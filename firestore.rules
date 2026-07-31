@@ -1,0 +1,105 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isOwner() {
+      return request.auth != null
+        && request.auth.token.keys().hasAll(['fidoOwner'])
+        && request.auth.token.fidoOwner == true;
+    }
+
+    function hasValidReceiptBase(receiptId) {
+      return request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.storagePath.matches(
+          'receipts/' + request.auth.uid + '/' + receiptId + '/[^/]+'
+        )
+        && request.resource.data.originalFileName is string
+        && request.resource.data.originalFileName.size() > 0
+        && request.resource.data.originalFileName.size() <= 255
+        && request.resource.data.contentType in [
+          'image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif',
+          'application/pdf'
+        ]
+        && request.resource.data.size is int
+        && request.resource.data.size > 0
+        && request.resource.data.size < 20 * 1024 * 1024
+        && request.resource.data.createdAt == request.time;
+    }
+
+    function isStoredOriginal(receiptId) {
+      return request.resource.data.status == 'stored'
+        && hasValidReceiptBase(receiptId)
+        && request.resource.data.keys().hasOnly([
+          'ownerUid', 'status', 'storagePath', 'originalFileName',
+          'contentType', 'size', 'createdAt'
+        ]);
+    }
+
+    function isValidCrop(crop) {
+      return crop is map
+        && crop.keys().hasOnly(['x', 'y', 'width', 'height'])
+        && crop.x is number && crop.x >= 0 && crop.x < 100
+        && crop.y is number && crop.y >= 0 && crop.y < 100
+        && crop.width is number && crop.width > 0 && crop.width <= 100
+        && crop.height is number && crop.height > 0 && crop.height <= 100
+        && crop.x + crop.width <= 100.001
+        && crop.y + crop.height <= 100.001;
+    }
+
+    function isValidProcessing(processing) {
+      return processing is map
+        && processing.keys().hasOnly([
+          'version', 'rotation', 'crop', 'sourceWidth', 'sourceHeight',
+          'outputWidth', 'outputHeight', 'sourcePage', 'qualityWarnings', 'processedAt'
+        ])
+        && processing.version == 1
+        && processing.rotation in [0, 90, 180, 270]
+        && isValidCrop(processing.crop)
+        && processing.sourceWidth is int && processing.sourceWidth > 0 && processing.sourceWidth <= 50000
+        && processing.sourceHeight is int && processing.sourceHeight > 0 && processing.sourceHeight <= 50000
+        && processing.outputWidth is int && processing.outputWidth > 0 && processing.outputWidth <= 2400
+        && processing.outputHeight is int && processing.outputHeight > 0 && processing.outputHeight <= 2400
+        && (!processing.keys().hasAny(['sourcePage'])
+          || processing.sourcePage == null
+          || (processing.sourcePage is int && processing.sourcePage > 0 && processing.sourcePage <= 1000))
+        && processing.qualityWarnings is list
+        && processing.qualityWarnings.size() <= 6
+        && processing.qualityWarnings.toSet().hasOnly([
+          'low-resolution', 'blurry', 'low-contrast', 'too-dark',
+          'overexposed', 'possible-glare'
+        ])
+        && processing.processedAt == request.time;
+    }
+
+    function isReviewedReceipt(receiptId) {
+      return request.resource.data.status == 'ready_for_extraction'
+        && hasValidReceiptBase(receiptId)
+        && request.resource.data.processedStoragePath ==
+          'receipts/' + request.auth.uid + '/' + receiptId + '/processed-v1.jpg'
+        && request.resource.data.processedContentType == 'image/jpeg'
+        && request.resource.data.processedSize is int
+        && request.resource.data.processedSize > 0
+        && request.resource.data.processedSize < 20 * 1024 * 1024
+        && isValidProcessing(request.resource.data.processing)
+        && request.resource.data.keys().hasOnly([
+          'ownerUid', 'status', 'storagePath', 'originalFileName',
+          'contentType', 'size', 'createdAt', 'processedStoragePath',
+          'processedContentType', 'processedSize', 'processing'
+        ]);
+    }
+
+    match /receipts/{receiptId} {
+      allow read: if isOwner() && resource.data.ownerUid == request.auth.uid;
+
+      allow create: if isOwner()
+        && (isStoredOriginal(receiptId) || isReviewedReceipt(receiptId));
+
+      allow delete: if isOwner() && resource.data.ownerUid == request.auth.uid;
+      allow update: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

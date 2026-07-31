@@ -1,0 +1,31 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isOwner(uid) {
+      return request.auth != null
+        && request.auth.token.keys().hasAll(['fidoOwner'])
+        && request.auth.token.fidoOwner == true
+        && request.auth.uid == uid;
+    }
+
+    match /receipts/{uid}/{receiptId}/{fileName} {
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid)
+        && request.resource.size > 0
+        && request.resource.size < 20 * 1024 * 1024
+        && (
+          request.resource.contentType.matches('image/(jpeg|png|webp|heic|heif)')
+          || request.resource.contentType == 'application/pdf'
+        )
+        && request.resource.metadata.receiptId == receiptId
+        && request.resource.metadata.ownerUid == uid;
+      allow delete: if isOwner(uid);
+      allow update: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

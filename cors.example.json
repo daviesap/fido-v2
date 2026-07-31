@@ -1,0 +1,13 @@
+[
+  {
+    "origin": [
+      "http://localhost:3000",
+      "https://fido-ceb0e.web.app",
+      "https://fido-ceb0e.firebaseapp.com",
+      "https://fido.flair.london"
+    ],
+    "method": ["GET", "HEAD"],
+    "responseHeader": ["Content-Type", "Content-Length", "Content-Disposition", "ETag"],
+    "maxAgeSeconds": 3600
+  }
+]

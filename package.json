@@ -1,0 +1,44 @@
+{
+  "name": "fido-receipts",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "npx serve out",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:rules": "vitest run --config vitest.rules.config.mts",
+    "emulators": "firebase emulators:exec --only firestore,storage --project demo-fido-rules \"npm run test:rules\"",
+    "emulators:start": "firebase emulators:start --only auth,firestore,storage,hosting --project demo-fido",
+    "deploy": "firebase deploy"
+  },
+  "dependencies": {
+    "firebase": "12.17.0",
+    "heic2any": "^0.0.4",
+    "next": "16.2.12",
+    "pdfjs-dist": "^4.10.38",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-image-crop": "^11.1.2",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "5.0.0",
+    "@types/node": "22.19.11",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "eslint": "9.39.2",
+    "eslint-config-next": "16.2.12",
+    "firebase-admin": "14.2.0",
+    "firebase-tools": "15.7.0",
+    "serve": "14.2.6",
+    "typescript": "5.9.3",
+    "vitest": "4.1.0"
+  },
+  "overrides": {
+    "postcss": "8.5.25",
+    "sharp": "0.35.3"
+  }
+}
