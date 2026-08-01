@@ -366,6 +366,7 @@ export function ReceiptApp() {
       )}
       {verificationTarget && (
         <ReceiptVerification
+          key={verificationTarget.id}
           receipt={verificationTarget}
           onCancel={() => setVerificationTarget(null)}
           onVerify={(values) => verifyReceipt(verificationTarget, values)}
