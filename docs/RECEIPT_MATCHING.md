@@ -20,6 +20,16 @@ The score is deterministic and totals 100 points:
 
 The UI shows every factor and never auto-confirms a result. Transactions outside the suggestion rules remain available through manual search. A transaction already proposed for another receipt cannot be selected again.
 
+### Foreign receipts before verification
+
+When a non-GBP receipt has no final GBP charge entered yet, the verification screen can request up to three likely debits from the private transaction cache. This fallback requires:
+
+- a strong merchant-name similarity;
+- a transaction date within three days;
+- a GBP debit inside a deliberately broad plausibility band for the printed currency and total.
+
+The bands are only a deterministic sanity check and are not presented or stored as exchange rates. Choosing a suggestion copies the transaction's actual GBP debit into **GBP amount charged**; the owner still verifies the receipt normally. Unsupported currencies and weak candidates fall back to manual entry.
+
 ## Out-of-pocket treatment
 
 When a receipt was paid personally or with cash, the server fetches the current company categories from `GET /v2/categories`. Only `admin_expenses_categories` and `cost_of_sales_categories` are offered. The owner must choose the category; OpenAI is not involved.

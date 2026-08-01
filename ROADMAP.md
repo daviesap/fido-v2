@@ -276,6 +276,7 @@ Fido can repeatedly synchronise the selected accounts without duplicates or data
 - Reviewable foreign and GBP out-of-pocket proposals with negative payment values, explicit VAT treatment, description, claimant, and processed JPEG attachment name.
 - Private proposal storage outside browser-readable Firestore paths, prevention of one transaction being proposed for two receipts, and cleanup on receipt deletion or FreeAgent disconnect.
 - **Ready to match** and **Proposal ready** receipt queues, including a mobile matching sheet.
+- A pre-verification foreign-receipt helper that ranks likely GBP debits by merchant, date, and broad currency plausibility, then copies the selected bank amount for owner confirmation.
 - A strict Stage 7 read-only boundary: no FreeAgent `POST`, `PUT`, or `DELETE` request is implemented.
 
 ### Candidate generation

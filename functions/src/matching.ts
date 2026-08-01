@@ -6,6 +6,8 @@ export type MatchingReceipt = {
   gbpAmountCharged: string | null;
 };
 
+export type ForeignMatchingReceipt = Omit<MatchingReceipt, "gbpAmountCharged">;
+
 export type MatchingTransaction = {
   id: string;
   datedOn: string;
@@ -47,6 +49,29 @@ export type RankedTransaction = MatchingTransaction & {
 
 const MAX_SUGGESTED_DAY_DIFFERENCE = 3;
 
+// These intentionally broad bands are plausibility checks, not exchange-rate
+// calculations. The selected bank debit remains the authoritative GBP value.
+const GBP_RATE_BANDS: Record<string, { min: number; max: number }> = {
+  USD: { min: 0.5, max: 1.1 },
+  EUR: { min: 0.6, max: 1.25 },
+  CAD: { min: 0.35, max: 0.9 },
+  AUD: { min: 0.3, max: 0.8 },
+  NZD: { min: 0.25, max: 0.75 },
+  CHF: { min: 0.65, max: 1.3 },
+  JPY: { min: 0.003, max: 0.012 },
+  CNY: { min: 0.07, max: 0.2 },
+  HKD: { min: 0.06, max: 0.16 },
+  SGD: { min: 0.4, max: 0.9 },
+  DKK: { min: 0.07, max: 0.18 },
+  NOK: { min: 0.04, max: 0.16 },
+  SEK: { min: 0.04, max: 0.16 },
+  PLN: { min: 0.12, max: 0.35 },
+  CZK: { min: 0.02, max: 0.07 },
+  INR: { min: 0.006, max: 0.02 },
+  BRL: { min: 0.08, max: 0.35 },
+  ZAR: { min: 0.02, max: 0.09 },
+};
+
 export function receiptGbpMinorUnits(receipt: MatchingReceipt): bigint {
   const value = receipt.currency === "GBP" ? receipt.grossTotal : receipt.gbpAmountCharged;
   if (!value) throw new Error("receipt_missing_gbp_amount");
@@ -86,6 +111,53 @@ export function rankTransactionMatches(
     });
 
   return { suggestions, otherTransactions };
+}
+
+export function rankForeignTransactionMatches(
+  receipt: ForeignMatchingReceipt,
+  transactions: MatchingTransaction[],
+): RankedTransaction[] {
+  if (receipt.currency === "GBP") throw new Error("receipt_is_not_foreign");
+  const originalAmount = moneyToMinorUnits(receipt.grossTotal);
+  if (originalAmount === null || originalAmount <= 0n) throw new Error("receipt_invalid_foreign_amount");
+
+  return transactions
+    .flatMap((transaction) => {
+      const amount = moneyToMinorUnits(transaction.amount);
+      if (amount === null || amount >= 0n) return [];
+      const debitAmount = -amount;
+      const dayDifference = differenceInDays(receipt.receiptDate, transaction.datedOn);
+      const merchantSimilarity = Math.max(
+        textSimilarity(receipt.merchantName, transaction.description),
+        textSimilarity(receipt.merchantName, transaction.fullDescription),
+      );
+      const amountScore = foreignAmountPlausibility(receipt.currency, originalAmount, debitAmount);
+      if (dayDifference > MAX_SUGGESTED_DAY_DIFFERENCE || merchantSimilarity < 0.45 || amountScore === 0) return [];
+
+      const factors = {
+        amount: amountScore,
+        date: foreignDayScore(dayDifference),
+        merchant: Math.round(merchantSimilarity * 50),
+      };
+      const score = factors.amount + factors.date + factors.merchant;
+      const reasons = [
+        merchantSimilarity >= 0.75 ? "Merchant closely matches" : "Merchant partly matches",
+        dayDifference === 0 ? "Same date" : `${dayDifference} day${dayDifference === 1 ? "" : "s"} apart`,
+        `GBP debit is plausible for ${receipt.currency} ${receipt.grossTotal}`,
+        moneyToMinorUnits(transaction.unexplainedAmount) === 0n ? "Transaction is already explained" : "Transaction is unexplained",
+      ];
+      return [{
+        ...transaction,
+        score,
+        confidence: score >= 85 ? "high" as const : score >= 65 ? "medium" as const : "low" as const,
+        dayDifference,
+        merchantSimilarity: Math.round(merchantSimilarity * 100),
+        factors,
+        reasons,
+      }];
+    })
+    .sort(compareRankedTransactions)
+    .slice(0, 3);
 }
 
 export function buildOutOfPocketExpenseDraft(input: {
@@ -162,6 +234,24 @@ function dayScore(dayDifference: number): number {
   if (dayDifference === 1) return 20;
   if (dayDifference === 2) return 14;
   if (dayDifference === 3) return 8;
+  return 0;
+}
+
+function foreignDayScore(dayDifference: number): number {
+  if (dayDifference === 0) return 30;
+  if (dayDifference === 1) return 24;
+  if (dayDifference === 2) return 16;
+  if (dayDifference === 3) return 8;
+  return 0;
+}
+
+function foreignAmountPlausibility(currency: string, originalAmount: bigint, debitGbpAmount: bigint): number {
+  const band = GBP_RATE_BANDS[currency];
+  if (!band) return 0;
+  const rate = Number(debitGbpAmount) / Number(originalAmount);
+  if (!Number.isFinite(rate) || rate <= 0) return 0;
+  if (rate >= band.min && rate <= band.max) return 20;
+  if (rate >= band.min * 0.75 && rate <= band.max * 1.25) return 8;
   return 0;
 }
 

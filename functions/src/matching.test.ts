@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildOutOfPocketExpenseDraft, rankTransactionMatches, receiptGbpMinorUnits, type MatchingTransaction } from "./matching.js";
+import {
+  buildOutOfPocketExpenseDraft,
+  rankForeignTransactionMatches,
+  rankTransactionMatches,
+  receiptGbpMinorUnits,
+  type MatchingTransaction,
+} from "./matching.js";
 
 const receipt = {
   merchantName: "Mamma Dough",
@@ -62,6 +68,48 @@ describe("receipt transaction matching", () => {
   it("requires a valid positive GBP settlement amount", () => {
     expect(() => receiptGbpMinorUnits({ ...receipt, currency: "EUR", gbpAmountCharged: null })).toThrow("receipt_missing_gbp_amount");
     expect(() => receiptGbpMinorUnits({ ...receipt, grossTotal: "0.00" })).toThrow("receipt_invalid_gbp_amount");
+  });
+
+  it("suggests a same-day foreign debit using merchant and amount plausibility", () => {
+    const result = rankForeignTransactionMatches({
+      merchantName: "DigitalOcean LLC",
+      receiptDate: "2026-08-01",
+      currency: "USD",
+      grossTotal: "4.80",
+    }, [transaction({
+      id: "digital-ocean",
+      datedOn: "2026-08-01",
+      amount: "-3.58",
+      description: "DigitalOcean (Card Payment)",
+      fullDescription: "DigitalOcean (Card Payment)/OTHER/GBP 3.58",
+      unexplainedAmount: "0.00",
+    })]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      id: "digital-ocean",
+      confidence: "high",
+      dayDifference: 0,
+      factors: { amount: 20, date: 30 },
+    });
+    expect(result[0]?.reasons).toContain("GBP debit is plausible for USD 4.80");
+    expect(result[0]?.reasons).toContain("Transaction is already explained");
+  });
+
+  it("does not offer unrelated, distant or implausible foreign debits", () => {
+    const foreignReceipt = {
+      merchantName: "DigitalOcean LLC",
+      receiptDate: "2026-08-01",
+      currency: "USD",
+      grossTotal: "4.80",
+    };
+    const result = rankForeignTransactionMatches(foreignReceipt, [
+      transaction({ id: "unrelated", datedOn: "2026-08-01", amount: "-3.58", description: "Coffee Shop", fullDescription: "Coffee Shop" }),
+      transaction({ id: "distant", datedOn: "2026-08-10", amount: "-3.58", description: "DigitalOcean", fullDescription: "DigitalOcean" }),
+      transaction({ id: "implausible", datedOn: "2026-08-01", amount: "-358.00", description: "DigitalOcean", fullDescription: "DigitalOcean" }),
+      transaction({ id: "credit", datedOn: "2026-08-01", amount: "3.58", description: "DigitalOcean", fullDescription: "DigitalOcean" }),
+    ]);
+    expect(result).toEqual([]);
   });
 
   it("prepares foreign out-of-pocket values without UK VAT", () => {

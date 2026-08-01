@@ -48,6 +48,7 @@ import {
 } from "./freeagent.js";
 import {
   buildOutOfPocketExpenseDraft,
+  rankForeignTransactionMatches,
   rankTransactionMatches,
   type MatchingReceipt,
   type RankedTransaction,
@@ -75,6 +76,13 @@ const FreeAgentAccountSelectionSchema = z.object({
 const ReceiptMatchRequestSchema = z.object({
   receiptId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
 }).strict();
+
+const ForeignReceiptSuggestionRequestSchema = ReceiptMatchRequestSchema.extend({
+  merchantName: z.string().trim().min(1).max(160),
+  receiptDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  currency: z.string().regex(/^[A-Z]{3}$/).refine((value) => value !== "GBP"),
+  grossTotal: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+});
 
 const FreeAgentCategoryUrlSchema = z.string().url().refine((value) => {
   const url = new URL(value);
@@ -560,6 +568,44 @@ export const getReceiptMatchOptions = onCall({
     suggestions: ranked.suggestions.map(publicRankedTransaction),
     otherTransactions: ranked.otherTransactions.map(publicRankedTransaction),
     existingProposal: existing ? publicMatchProposal(existing.data()) : null,
+    lastSyncCompletedAt: lastSyncCompletedAt?.toDate().toISOString() ?? null,
+    writeEnabled: false as const,
+  };
+});
+
+export const getForeignReceiptMatchOptions = onCall({
+  region: "europe-west1",
+  timeoutSeconds: 30,
+}, async (request) => {
+  const ownerUid = requireOwner(request.auth);
+  const parsed = ForeignReceiptSuggestionRequestSchema.safeParse(request.data);
+  if (!parsed.success) throw new HttpsError("invalid-argument", "Complete the foreign receipt merchant, date, currency and total first.");
+  const receiptSnapshot = await getFirestore().collection("receipts").doc(parsed.data.receiptId).get();
+  if (!receiptSnapshot.exists || receiptSnapshot.get("ownerUid") !== ownerUid) {
+    throw new HttpsError("not-found", "Receipt not found.");
+  }
+  if (receiptSnapshot.get("status") !== "ready_for_extraction"
+    || receiptSnapshot.get("extraction.state") !== "ready_for_verification") {
+    throw new HttpsError("failed-precondition", "This receipt is not awaiting verification.");
+  }
+
+  const [transactionSnapshot, proposalSnapshot, syncSnapshot] = await Promise.all([
+    freeAgentTransactionsRef(ownerUid).get(),
+    freeAgentMatchProposalsRef(ownerUid).get(),
+    freeAgentSyncRef(ownerUid).get(),
+  ]);
+  const reservedIds = new Set(proposalSnapshot.docs.flatMap((document) => {
+    if (document.get("type") !== "transaction") return [];
+    const transactionId = document.get("transaction.id");
+    return typeof transactionId === "string" ? [transactionId] : [];
+  }));
+  const transactions = transactionSnapshot.docs
+    .map((document) => publicFreeAgentTransaction(document.data()))
+    .filter((transaction) => !reservedIds.has(transaction.id));
+  const suggestions = rankForeignTransactionMatches(parsed.data, transactions);
+  const lastSyncCompletedAt = syncSnapshot.get("lastSyncCompletedAt") as Timestamp | undefined;
+  return {
+    suggestions: suggestions.map(publicRankedTransaction),
     lastSyncCompletedAt: lastSyncCompletedAt?.toDate().toISOString() ?? null,
     writeEnabled: false as const,
   };
