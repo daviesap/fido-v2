@@ -47,8 +47,46 @@ const CompanyResponseSchema = z.object({
   }),
 });
 
+const FreeAgentUrlSchema = z.string().url().refine((value) => {
+  const url = new URL(value);
+  return url.origin === FREEAGENT_API_ORIGIN && url.pathname.startsWith("/v2/");
+}, "Expected a production FreeAgent API URL");
+
+const BankAccountSchema = z.object({
+  url: FreeAgentUrlSchema,
+  type: z.string().min(1).max(80),
+  name: z.string().min(1).max(160),
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  is_personal: z.boolean(),
+  status: z.enum(["active", "hidden"]),
+});
+
+const BankAccountsResponseSchema = z.object({
+  bank_accounts: z.array(BankAccountSchema).max(100),
+});
+
+const SignedMoneySchema = z.string().regex(/^-?[0-9]{1,12}(?:\.[0-9]{1,10})?$/);
+
+const BankTransactionSchema = z.object({
+  url: FreeAgentUrlSchema,
+  amount: SignedMoneySchema,
+  bank_account: FreeAgentUrlSchema,
+  dated_on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  description: z.string().max(500),
+  full_description: z.string().max(2000),
+  unexplained_amount: SignedMoneySchema,
+  transaction_id: z.string().max(500).nullable().optional(),
+  updated_at: z.string().datetime({ offset: true }),
+});
+
+const BankTransactionsResponseSchema = z.object({
+  bank_transactions: z.array(BankTransactionSchema).max(100),
+});
+
 export type FreeAgentTokens = z.infer<typeof TokenResponseSchema>;
 export type FreeAgentIdentity = ReturnType<typeof parseIdentity>;
+export type FreeAgentBankAccount = ReturnType<typeof normaliseBankAccount>;
+export type FreeAgentBankTransaction = ReturnType<typeof normaliseBankTransaction>;
 
 export type EncryptedSecret = {
   version: 1;
@@ -109,6 +147,44 @@ export async function fetchFreeAgentIdentity(accessToken: string, fetchImpl: typ
   return parseIdentity(userJson, companyJson);
 }
 
+export async function fetchFreeAgentBankAccounts(
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<FreeAgentBankAccount[]> {
+  const accounts = await fetchFreeAgentPages({
+    path: "/v2/bank_accounts",
+    accessToken,
+    fetchImpl,
+    parse: (value) => BankAccountsResponseSchema.parse(value).bank_accounts,
+  });
+  return accounts.map(normaliseBankAccount);
+}
+
+export async function fetchFreeAgentBankTransactions(input: {
+  accessToken: string;
+  bankAccountUrl: string;
+  fromDate: string;
+  toDate: string;
+  fetchImpl?: typeof fetch;
+}): Promise<FreeAgentBankTransaction[]> {
+  const bankAccountUrl = FreeAgentUrlSchema.parse(input.bankAccountUrl);
+  const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+  const fromDate = dateSchema.parse(input.fromDate);
+  const toDate = dateSchema.parse(input.toDate);
+  if (fromDate > toDate) throw new FreeAgentRequestError("invalid_transaction_window", 400);
+  const url = new URL("/v2/bank_transactions", FREEAGENT_API_ORIGIN);
+  url.searchParams.set("bank_account", bankAccountUrl);
+  url.searchParams.set("from_date", fromDate);
+  url.searchParams.set("to_date", toDate);
+  const transactions = await fetchFreeAgentPages({
+    path: `${url.pathname}${url.search}`,
+    accessToken: input.accessToken,
+    fetchImpl: input.fetchImpl ?? fetch,
+    parse: (value) => BankTransactionsResponseSchema.parse(value).bank_transactions,
+  });
+  return transactions.map(normaliseBankTransaction);
+}
+
 export function encryptSecret(value: string, encodedKey: string): EncryptedSecret {
   const key = encryptionKey(encodedKey);
   const iv = randomBytes(12);
@@ -160,6 +236,11 @@ async function requestTokens(input: {
 }
 
 async function freeAgentGet(path: string, accessToken: string, fetchImpl: typeof fetch): Promise<unknown> {
+  const response = await freeAgentGetResponse(path, accessToken, fetchImpl);
+  return response.json();
+}
+
+async function freeAgentGetResponse(path: string, accessToken: string, fetchImpl: typeof fetch): Promise<Response> {
   const response = await fetchImpl(`${FREEAGENT_API_ORIGIN}${path}`, {
     method: "GET",
     headers: {
@@ -170,7 +251,27 @@ async function freeAgentGet(path: string, accessToken: string, fetchImpl: typeof
     signal: AbortSignal.timeout(30_000),
   });
   if (!response.ok) throw new FreeAgentRequestError("api_request_failed", response.status);
-  return response.json();
+  return response;
+}
+
+async function fetchFreeAgentPages<T>(input: {
+  path: string;
+  accessToken: string;
+  fetchImpl: typeof fetch;
+  parse: (value: unknown) => T[];
+}): Promise<T[]> {
+  const result: T[] = [];
+  for (let page = 1; page <= 50; page += 1) {
+    const url = new URL(input.path, FREEAGENT_API_ORIGIN);
+    url.searchParams.set("page", String(page));
+    url.searchParams.set("per_page", "100");
+    const response = await freeAgentGetResponse(`${url.pathname}${url.search}`, input.accessToken, input.fetchImpl);
+    const items = input.parse(await response.json());
+    result.push(...items);
+    const total = Number.parseInt(response.headers.get("x-total-count") ?? "", 10);
+    if (items.length < 100 || (Number.isFinite(total) && result.length >= total)) return result;
+  }
+  throw new FreeAgentRequestError("pagination_limit_exceeded", 422);
 }
 
 function parseIdentity(userJson: unknown, companyJson: unknown) {
@@ -194,6 +295,43 @@ function parseIdentity(userJson: unknown, companyJson: unknown) {
       currency: company.currency,
     },
   };
+}
+
+function normaliseBankAccount(account: z.infer<typeof BankAccountSchema>) {
+  return {
+    id: freeAgentResourceId(account.url, "bank_accounts"),
+    url: account.url,
+    name: account.name,
+    type: account.type,
+    currency: account.currency,
+    isPersonal: account.is_personal,
+    status: account.status,
+  };
+}
+
+function normaliseBankTransaction(transaction: z.infer<typeof BankTransactionSchema>) {
+  return {
+    id: freeAgentResourceId(transaction.url, "bank_transactions"),
+    url: transaction.url,
+    bankAccountId: freeAgentResourceId(transaction.bank_account, "bank_accounts"),
+    bankAccountUrl: transaction.bank_account,
+    datedOn: transaction.dated_on,
+    amount: transaction.amount,
+    description: transaction.description,
+    fullDescription: transaction.full_description,
+    unexplainedAmount: transaction.unexplained_amount,
+    transactionId: transaction.transaction_id ?? null,
+    updatedAt: transaction.updated_at,
+  };
+}
+
+function freeAgentResourceId(value: string, resource: "bank_accounts" | "bank_transactions"): string {
+  const url = new URL(value);
+  const match = url.pathname.match(new RegExp(`^/v2/${resource}/([^/]+)$`));
+  if (!match?.[1] || !/^[A-Za-z0-9_-]{1,128}$/.test(match[1])) {
+    throw new FreeAgentRequestError("invalid_resource_url", 502);
+  }
+  return match[1];
 }
 
 function encryptionKey(encodedKey: string): Buffer {

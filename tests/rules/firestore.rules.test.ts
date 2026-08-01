@@ -309,11 +309,22 @@ describe("Firestore receipt rules", () => {
         ownerUid,
         expiresAt: serverTimestamp(),
       });
+      await setDoc(doc(context.firestore(), "freeAgentSync/owner-user"), {
+        ownerUid,
+        selectedAccounts: [{ id: "1", name: "Business account", currency: "GBP" }],
+      });
+      await setDoc(doc(context.firestore(), "freeAgentSync/owner-user/transactions/transaction-hash"), {
+        ownerUid,
+        amount: "-12.40",
+        description: "Private transaction",
+      });
     });
     const db = testEnv.authenticatedContext(ownerUid, { fidoOwner: true }).firestore();
 
     await assertFails(getDoc(doc(db, "freeAgentConnections/owner-user")));
     await assertFails(getDoc(doc(db, "freeAgentOAuthStates/state-hash")));
+    await assertFails(getDoc(doc(db, "freeAgentSync/owner-user")));
+    await assertFails(getDoc(doc(db, "freeAgentSync/owner-user/transactions/transaction-hash")));
   });
 
   it("denies updates and unexpected fields", async () => {

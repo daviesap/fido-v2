@@ -1,12 +1,14 @@
 # Fido Receipt Manager — capture, extraction, and review
 
-Fido lets one permitted Google account photograph, upload, or email a receipt image or PDF, review its crop, and privately store both the untouched original and a processed JPEG. A background Firebase task then extracts merchant, a short purchase description, date, currency, gross total, and explicit UK net/VAT totals with OpenAI. The owner can correct and verify those values later. Foreign receipts also require the real GBP card or bank charge; Fido never estimates exchange rates. A server-side OAuth connection can securely identify the owner's live FreeAgent company; transaction import is the next stage.
+Fido lets one permitted Google account photograph, upload, or email a receipt image or PDF, review its crop, and privately store both the untouched original and a processed JPEG. A background Firebase task then extracts merchant, a short purchase description, date, currency, gross total, and explicit UK net/VAT totals with OpenAI. The owner can correct and verify those values later. Foreign receipts also require the real GBP card or bank charge; Fido never estimates exchange rates. A server-side OAuth connection securely accesses the owner's live FreeAgent company, and the owner can select GBP accounts for a private, read-only 90-day transaction view. Receipts paid personally or with cash follow a separate, explicitly confirmed out-of-pocket Expense route.
 
 Receipt attachments can also arrive through `receipts@flair.london`. The Gmail, Cloudflare Email Worker, and Firebase Function setup is documented in [docs/EMAIL_INGESTION.md](docs/EMAIL_INGESTION.md).
 
 Background extraction, Firebase secret setup, and production verification are documented in [docs/RECEIPT_EXTRACTION.md](docs/RECEIPT_EXTRACTION.md).
 
 Live FreeAgent OAuth architecture, secret setup, and deployment are documented in [docs/FREEAGENT_OAUTH.md](docs/FREEAGENT_OAUTH.md).
+
+Read-only bank account selection, transaction synchronisation, and the planned out-of-pocket workflow are documented in [docs/FREEAGENT_BANKING.md](docs/FREEAGENT_BANKING.md).
 
 The app remains a static Next.js PWA hosted on Firebase Hosting. Cropping, rotation, HEIC conversion, conservative image enhancement, and quality analysis happen in the browser. Firestore stores file metadata plus validated receipt-level totals; receipt images remain private in Storage and are read with the signed-in Firebase session. Security rules require both the correct UID and a private `fidoOwner` custom claim.
 

@@ -1,4 +1,5 @@
 import PostalMime, { type Address, type Attachment } from "postal-mime";
+import { createEmailBodyAttachment } from "./email-body";
 import {
   INGEST_PROTOCOL_VERSION,
   MAX_ATTACHMENTS,
@@ -62,8 +63,21 @@ export default {
         contentBase64: bytesToBase64(bytes),
       });
     }
+    const sender = firstAddress(parsed.from) || normaliseAddress(message.from);
+    const subject = (parsed.subject || "Receipt by email").trim().slice(0, 200);
+    const receivedAt = normaliseDate(parsed.date);
+    const bodyAttachment = await createEmailBodyAttachment({
+      existingAttachmentCount: attachments.length,
+      sender,
+      subject,
+      receivedAt,
+      text: parsed.text,
+      html: parsed.html,
+    });
+    if (bodyAttachment) attachments.push(bodyAttachment);
+
     if (attachments.length === 0) {
-      message.setReject("No supported PDF or image receipt attachment was found");
+      message.setReject("No supported PDF, image, or readable email receipt body was found");
       return;
     }
 
@@ -72,11 +86,11 @@ export default {
       eventId: crypto.randomUUID(),
       envelopeFrom: normaliseAddress(message.from),
       envelopeTo: normaliseAddress(message.to),
-      sender: firstAddress(parsed.from) || normaliseAddress(message.from),
+      sender,
       originalRecipients,
-      subject: (parsed.subject || "Receipt by email").trim().slice(0, 200),
+      subject,
       messageId: (parsed.messageId || message.headers.get("message-id") || "").trim().slice(0, 500),
-      receivedAt: normaliseDate(parsed.date),
+      receivedAt,
       attachments,
     };
     const body = JSON.stringify(payload);

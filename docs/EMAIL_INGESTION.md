@@ -5,13 +5,13 @@ Fido keeps `receipts@flair.london` in Google Mail. No MX records on the apex `fl
 The ingestion path is:
 
 1. A receipt reaches `receipts@flair.london` in Gmail.
-2. A Gmail filter forwards messages with attachments to a long, private address on `ingest.flair.london`.
+2. A Gmail filter forwards receipt messages to a long, private address on `ingest.flair.london`.
 3. Cloudflare Email Routing sends only that private address to the `fido-receipt-email` Worker.
-4. The Worker parses attachment MIME parts, drops inline images, applies size limits, and signs the exact JSON payload.
+4. The Worker parses attachment MIME parts, drops inline images, and applies size limits. If no supported attachment exists, it converts the plain-text email body (or safely stripped HTML) into a PDF without executing HTML or loading remote content.
 5. Firebase verifies the signature and timestamp, validates file magic bytes, rate-limits, deduplicates, and stores each attachment as a `needs_review` receipt.
 6. The owner reviews the attachment in Fido using the existing PDF page selection, crop, rotation, and quality workflow.
 
-The Worker never sends email bodies to Firebase. Firebase stores only minimal provenance: sender, subject, message ID, and received time.
+The Worker never sends raw email bodies or HTML to Firebase. For a body-only receipt, it sends only the generated PDF. Firebase otherwise stores minimal provenance: sender, subject, message ID, and received time.
 
 ## 1. Choose the private forwarding address
 
@@ -87,7 +87,7 @@ Gmail requires confirmation before it will forward to a new address. Temporarily
 2. Under **Forwarding and POP/IMAP**, add the private `@ingest.flair.london` address.
 3. Open and confirm Google's verification message in the temporary destination mailbox.
 4. Change the Cloudflare rule for the private address from the temporary mailbox to `fido-receipt-email`.
-5. In Gmail, create a filter matching `to:receipts@flair.london has:attachment`.
+5. In Gmail, create a filter matching `to:receipts@flair.london`.
 6. Select **Forward it to** the private address and keep Gmail's copy.
 
 Only new matching messages are forwarded by Gmail filters. Existing receipts can be forwarded manually after setup.
@@ -100,6 +100,7 @@ Only new matching messages are forwarded by Gmail filters. Existing receipts can
 4. Open Fido and confirm the attachment appears as **Needs review**.
 5. Review it, save the processed image, and compare the processed version with the original.
 6. Forward the same message again and confirm Fido does not create a duplicate.
+7. Send an HTML-only receipt with no attachment and confirm that it appears as an `email-receipt.pdf` item.
 
 ## Limits and rejection behaviour
 
@@ -109,8 +110,10 @@ Only new matching messages are forwarded by Gmail filters. Existing receipts can
 - Maximum supported attachments per email: 10.
 - Maximum combined supported attachment size: 17 MiB. Direct site uploads remain limited to 20 MB.
 - Inline/related images such as signature logos are ignored.
+- When there is no supported attachment, the email's plain-text body is converted to PDF. HTML-only bodies are stripped to text first; HTML is never rendered or executed and remote content is never loaded.
+- Email body conversion is limited to 100,000 characters. Supported attachments take precedence, so an email cannot create both attachment receipts and a body receipt.
 - File types are determined from magic bytes at Firebase, not trusted extensions or MIME headers.
 - Password-protected PDFs reach the review queue but the browser will ask for an unlocked copy when review is attempted.
-- Email bodies, HTML, and unrelated headers are not sent to or stored by Firebase.
+- Raw email bodies, HTML, and unrelated headers are not sent to or stored by Firebase. Only the generated PDF is sent through the existing attachment ingestion path.
 
 Official setup references: [Cloudflare subdomain routing](https://developers.cloudflare.com/email-service/configuration/subdomains/), [Cloudflare Email Workers](https://developers.cloudflare.com/email-service/api/route-emails/email-handler/), and [Gmail forwarding](https://support.google.com/mail/answer/10957).
