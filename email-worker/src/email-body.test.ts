@@ -41,6 +41,20 @@ describe("email body receipt fallback", () => {
     expect(text).not.toContain("fetch");
   });
 
+  it("removes encoded and malformed HTML openers after entity decoding", () => {
+    const text = htmlToPlainText(`
+      <p>Paid &pound;3.00</p>
+      &lt;script&gt;alert(1)&lt;/script&gt;
+      &lt;!-- hidden marker --&gt;
+      <scr<script>ipt>nested opener</scr<script>ipt>
+    `);
+
+    expect(text).toContain("Paid £3.00");
+    expect(text).not.toMatch(/[<>]/);
+    expect(text.toLowerCase()).not.toContain("<script");
+    expect(text).not.toContain("<!--");
+  });
+
   it("bounds the amount of body text converted", () => {
     const text = emailBodyText("x".repeat(MAX_EMAIL_BODY_CHARACTERS + 100));
 

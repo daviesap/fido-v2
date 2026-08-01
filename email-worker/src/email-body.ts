@@ -57,7 +57,7 @@ export function emailBodyText(text?: string, html?: string): string {
 }
 
 export function htmlToPlainText(html: string): string {
-  return decodeHtmlEntities(html
+  const text = decodeHtmlEntities(html
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/<(script|style|head|noscript|svg|canvas|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
     .replace(/<br\s*\/?>/gi, "\n")
@@ -65,6 +65,10 @@ export function htmlToPlainText(html: string): string {
     .replace(/<\/(?:p|div|section|article|header|footer|table|tr|ul|ol|li|h[1-6]|blockquote|pre)\s*>/gi, "\n")
     .replace(/<\/(?:td|th)\s*>/gi, "\t")
     .replace(/<[^>]+>/g, ""));
+  // Entity decoding and malformed markup can reintroduce tag openers after
+  // stripping. PDF text never needs angle brackets, so remove them at the
+  // final trust boundary as defence in depth.
+  return text.replace(/[<>]/g, "");
 }
 
 async function createEmailBodyPdf(input: {
