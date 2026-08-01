@@ -3,8 +3,7 @@ updates:
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
       time: "06:00"
       timezone: Europe/London
     groups:
@@ -17,8 +16,7 @@ updates:
   - package-ecosystem: npm
     directory: /functions
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
       time: "06:15"
       timezone: Europe/London
     groups:
@@ -31,8 +29,7 @@ updates:
   - package-ecosystem: npm
     directory: /email-worker
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
       time: "06:30"
       timezone: Europe/London
     groups:
@@ -45,8 +42,7 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
       time: "06:45"
       timezone: Europe/London
     groups:
