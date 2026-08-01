@@ -85,4 +85,26 @@ describe("receipt display helpers", () => {
 
     expect(displayStoragePath({ id: "id", ...parsed })).toBe("receipts/owner/id/processed-v1.jpg");
   });
+
+  it("keeps an emailed receipt on its immutable original until review", () => {
+    const parsed = ReceiptSchema.parse({
+      ownerUid: "owner",
+      status: "needs_review",
+      source: "email",
+      storagePath: "receipts/owner/id/original-receipt.pdf",
+      originalFileName: "receipt.pdf",
+      contentType: "application/pdf",
+      size: 2000,
+      contentHash: "a".repeat(64),
+      email: {
+        sender: "sender@example.com",
+        subject: "Receipt",
+        messageId: "<message@example.com>",
+        receivedAt: null,
+      },
+      createdAt: null,
+    });
+
+    expect(displayStoragePath({ id: "id", ...parsed })).toBe("receipts/owner/id/original-receipt.pdf");
+  });
 });

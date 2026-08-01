@@ -33,7 +33,27 @@ export const ReceiptSchema = z.discriminatedUnion("status", [
     status: z.literal("stored"),
   }),
   ReceiptBaseSchema.extend({
+    status: z.literal("needs_review"),
+    source: z.literal("email"),
+    contentHash: z.string().length(64),
+    email: z.object({
+      sender: z.string().email(),
+      subject: z.string().min(1).max(200),
+      messageId: z.string().max(500),
+      receivedAt: z.unknown(),
+    }),
+  }),
+  ReceiptBaseSchema.extend({
     status: z.literal("ready_for_extraction"),
+    source: z.literal("email").optional(),
+    contentHash: z.string().length(64).optional(),
+    email: z.object({
+      sender: z.string().email(),
+      subject: z.string().min(1).max(200),
+      messageId: z.string().max(500),
+      receivedAt: z.unknown(),
+    }).optional(),
+    reviewedAt: z.unknown().optional(),
     processedStoragePath: z.string().min(1),
     processedContentType: z.literal("image/jpeg"),
     processedSize: z.number().int().positive().max(MAX_RECEIPT_BYTES),

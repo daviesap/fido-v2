@@ -10,6 +10,7 @@ import {
   query,
   serverTimestamp,
   setDoc,
+  updateDoc,
   where,
 } from "firebase/firestore";
 import {
@@ -33,6 +34,8 @@ import {
 } from "@/lib/receipt";
 
 type AppMessage = { text: string; error?: boolean };
+type EmailReviewReceipt = Extract<Receipt, { status: "needs_review" }>;
+type ReviewTarget = { file: File; receipt?: EmailReviewReceipt };
 
 export function ReceiptApp() {
   const { user, signOut } = useAuth();
@@ -43,7 +46,10 @@ export function ReceiptApp() {
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState<AppMessage | null>(null);
   const [selected, setSelected] = useState<Receipt | null>(null);
-  const [reviewFile, setReviewFile] = useState<File | null>(null);
+  const [reviewTarget, setReviewTarget] = useState<ReviewTarget | null>(null);
+  const [openingReviewId, setOpeningReviewId] = useState<string | null>(null);
+  const [emailCopied, setEmailCopied] = useState(false);
+  const receiptEmailAddress = process.env.NEXT_PUBLIC_RECEIPT_EMAIL_ADDRESS ?? "receipts@flair.london";
 
   useEffect(() => {
     if (!user) return;
@@ -68,50 +74,48 @@ export function ReceiptApp() {
       return;
     }
     setMessage(null);
-    setReviewFile(file);
+    setReviewTarget({ file });
     if (inputRef.current) inputRef.current.value = "";
   }
 
   async function uploadReviewedReceipt(processed: ProcessedReceiptImage) {
-    const file = reviewFile;
+    const target = reviewTarget;
+    const file = target?.file;
     if (!file || !user) return;
-    setReviewFile(null);
+    setReviewTarget(null);
     setUploading(true);
     setProgress(0);
     setMessage(null);
 
-    const receiptId = crypto.randomUUID();
-    const originalPath = `receipts/${user.uid}/${receiptId}/original-${safeFileName(file.name)}`;
+    const receiptId = target.receipt?.id ?? crypto.randomUUID();
+    const originalPath = target.receipt?.storagePath ?? `receipts/${user.uid}/${receiptId}/original-${safeFileName(file.name)}`;
     const processedPath = `receipts/${user.uid}/${receiptId}/processed-v${PROCESSING_VERSION}.jpg`;
     const originalRef = ref(storage, originalPath);
     const processedRef = ref(storage, processedPath);
     const uploadedObjects: StorageReference[] = [];
-    const totalBytes = file.size + processed.blob.size;
+    const totalBytes = (target.receipt ? 0 : file.size) + processed.blob.size;
 
     try {
-      await uploadObject(originalRef, file, {
-        contentType: receiptContentType(file)!,
-        receiptId,
-        ownerUid: user.uid,
-        assetType: "original",
-      }, (transferred) => setProgress(Math.round((transferred / totalBytes) * 100)));
-      uploadedObjects.push(originalRef);
+      if (!target.receipt) {
+        await uploadObject(originalRef, file, {
+          contentType: receiptContentType(file)!,
+          receiptId,
+          ownerUid: user.uid,
+          assetType: "original",
+        }, (transferred) => setProgress(Math.round((transferred / totalBytes) * 100)));
+        uploadedObjects.push(originalRef);
+      }
 
       await uploadObject(processedRef, processed.blob, {
         contentType: "image/jpeg",
         receiptId,
         ownerUid: user.uid,
         assetType: "processed",
-      }, (transferred) => setProgress(Math.round(((file.size + transferred) / totalBytes) * 100)));
+      }, (transferred) => setProgress(Math.round((((target.receipt ? 0 : file.size) + transferred) / totalBytes) * 100)));
       uploadedObjects.push(processedRef);
 
-      await setDoc(doc(db, "receipts", receiptId), {
-        ownerUid: user.uid,
+      const reviewedFields = {
         status: "ready_for_extraction",
-        storagePath: originalPath,
-        originalFileName: file.name,
-        contentType: receiptContentType(file),
-        size: file.size,
         processedStoragePath: processedPath,
         processedContentType: "image/jpeg",
         processedSize: processed.blob.size,
@@ -132,15 +136,58 @@ export function ReceiptApp() {
           qualityWarnings: processed.qualityWarnings,
           processedAt: serverTimestamp(),
         },
+      } as const;
+      if (target.receipt) {
+        await updateDoc(doc(db, "receipts", receiptId), {
+          ...reviewedFields,
+          reviewedAt: serverTimestamp(),
+        });
+      } else {
+        await setDoc(doc(db, "receipts", receiptId), {
+        ownerUid: user.uid,
+        storagePath: originalPath,
+        originalFileName: file.name,
+        contentType: receiptContentType(file),
+        size: file.size,
+        ...reviewedFields,
         createdAt: serverTimestamp(),
       });
+      }
       setProgress(100);
-      setMessage({ text: processed.qualityWarnings.length ? "Receipt stored with its quality notes." : "Receipt cropped and stored safely." });
+      setMessage({ text: target.receipt
+        ? "Emailed receipt reviewed and ready for extraction."
+        : processed.qualityWarnings.length ? "Receipt stored with its quality notes." : "Receipt cropped and stored safely." });
     } catch (error) {
       await Promise.all(uploadedObjects.map((objectRef) => deleteObject(objectRef).catch(() => undefined)));
       setMessage({ text: error instanceof Error ? error.message : "Upload failed.", error: true });
     } finally {
       setUploading(false);
+    }
+  }
+
+  async function reviewEmailedReceipt(receipt: EmailReviewReceipt) {
+    setOpeningReviewId(receipt.id);
+    setMessage(null);
+    try {
+      const blob = await getBlob(ref(storage, receipt.storagePath));
+      setReviewTarget({
+        receipt,
+        file: new File([blob], receipt.originalFileName, { type: receipt.contentType }),
+      });
+    } catch (error) {
+      setMessage({ text: error instanceof Error ? error.message : "The emailed receipt could not be opened.", error: true });
+    } finally {
+      setOpeningReviewId(null);
+    }
+  }
+
+  async function copyReceiptEmail() {
+    try {
+      await navigator.clipboard.writeText(receiptEmailAddress);
+      setEmailCopied(true);
+      window.setTimeout(() => setEmailCopied(false), 1800);
+    } catch {
+      setMessage({ text: `Send receipts to ${receiptEmailAddress}.` });
     }
   }
 
@@ -169,9 +216,21 @@ export function ReceiptApp() {
       </header>
       <main className="page">
         <section className="intro">
-          <p className="eyebrow">Stage two · image review</p>
+          <p className="eyebrow">Stage three · capture anywhere</p>
           <h1>A clear view of every receipt.</h1>
-          <p>Photograph or choose a receipt, then crop, rotate, and check it before Fido stores both the untouched original and a clean processing copy.</p>
+          <p>Photograph, upload, or email a receipt, then crop, rotate, and check it before Fido stores both the untouched original and a clean processing copy.</p>
+        </section>
+
+        <section className="email-receipt-card">
+          <div>
+            <p className="eyebrow light">Email a receipt</p>
+            <h2>Forward attachments straight to Fido.</h2>
+            <p>Send a PDF or image attachment. It will arrive below as <strong>Needs review</strong>; email bodies and signatures are not stored.</p>
+          </div>
+          <button type="button" onClick={() => void copyReceiptEmail()}>
+            <span>{receiptEmailAddress}</span>
+            <strong>{emailCopied ? "Copied" : "Copy"}</strong>
+          </button>
         </section>
 
         <section className="upload-card">
@@ -208,14 +267,21 @@ export function ReceiptApp() {
           ) : (
             <div className="receipt-grid">
               {receipts.map((receipt) => (
-                <ReceiptCard key={receipt.id} receipt={receipt} onOpen={() => setSelected(receipt)} onDelete={() => void remove(receipt)} />
+                <ReceiptCard
+                  key={receipt.id}
+                  receipt={receipt}
+                  opening={openingReviewId === receipt.id}
+                  onOpen={() => receipt.status === "needs_review" ? void reviewEmailedReceipt(receipt) : setSelected(receipt)}
+                  onReview={() => receipt.status === "needs_review" ? void reviewEmailedReceipt(receipt) : undefined}
+                  onDelete={() => void remove(receipt)}
+                />
               ))}
             </div>
           )}
         </section>
       </main>
-      {reviewFile && (
-        <ReceiptReview file={reviewFile} onCancel={() => setReviewFile(null)} onApprove={(result) => void uploadReviewedReceipt(result)} />
+      {reviewTarget && (
+        <ReceiptReview file={reviewTarget.file} onCancel={() => setReviewTarget(null)} onApprove={(result) => void uploadReviewedReceipt(result)} />
       )}
       {selected && <ReceiptViewer receipt={selected} onClose={() => setSelected(null)} onDelete={() => void remove(selected)} />}
     </div>
@@ -245,10 +311,11 @@ function uploadObject(
   ));
 }
 
-function useReceiptImage(path: string) {
+function useReceiptImage(path: string | null) {
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
+    if (!path) return;
     let currentUrl: string | null = null;
     let active = true;
     void getBlob(ref(storage, path))
@@ -272,26 +339,45 @@ function useReceiptImage(path: string) {
   return { url, failed };
 }
 
-function ReceiptCard({ receipt, onOpen, onDelete }: { receipt: Receipt; onOpen(): void; onDelete(): void }) {
-  const { url, failed } = useReceiptImage(displayStoragePath(receipt));
+function ReceiptCard({
+  receipt,
+  opening,
+  onOpen,
+  onReview,
+  onDelete,
+}: {
+  receipt: Receipt;
+  opening: boolean;
+  onOpen(): void;
+  onReview(): void;
+  onDelete(): void;
+}) {
+  const needsReview = receipt.status === "needs_review";
+  const { url, failed } = useReceiptImage(needsReview && receipt.contentType === "application/pdf" ? null : displayStoragePath(receipt));
   const date = (receipt.createdAt as { toDate?: () => Date } | null)?.toDate?.();
   return (
     <article className="receipt-card">
-      <button className="receipt-preview" onClick={onOpen} aria-label={`View ${receipt.originalFileName}`}>
-        {url ? (
+      <button className="receipt-preview" onClick={onOpen} aria-label={`View ${receipt.originalFileName}`} disabled={opening}>
+        {needsReview && receipt.contentType === "application/pdf" ? (
+          <span className="pdf-placeholder"><strong>PDF</strong>{opening ? "Opening…" : "Ready to review"}</span>
+        ) : url ? (
           // Object URLs are private, authenticated blobs and should not use Next's server image optimizer.
           // eslint-disable-next-line @next/next/no-img-element
           <img src={url} alt="" />
         ) : <span>{failed ? "Preview unavailable" : "Loading…"}</span>}
       </button>
       <div className="receipt-info">
-        <span className={`status-pill ${receipt.status === "ready_for_extraction" ? "ready" : "legacy"}`}>
-          {receipt.status === "ready_for_extraction" ? "Reviewed" : "Original only"}
+        <span className={`status-pill ${receipt.status === "ready_for_extraction" ? "ready" : needsReview ? "attention" : "legacy"}`}>
+          {receipt.status === "ready_for_extraction" ? "Reviewed" : needsReview ? "Needs review" : "Original only"}
         </span>
         <strong title={receipt.originalFileName}>{receipt.originalFileName}</strong>
+        {needsReview && <small className="email-origin">From {receipt.email.sender}</small>}
         <small>{date ? date.toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }) : "Just now"} · {formatBytes(receipt.size)}</small>
       </div>
-      <button className="delete-button" onClick={onDelete} aria-label={`Delete ${receipt.originalFileName}`}>Delete</button>
+      <div className="receipt-card-actions">
+        {needsReview && <button className="review-button" onClick={onReview} disabled={opening}>{opening ? "Opening…" : "Review receipt"}</button>}
+        <button className="delete-button" onClick={onDelete} aria-label={`Delete ${receipt.originalFileName}`}>Delete</button>
+      </div>
     </article>
   );
 }
@@ -299,10 +385,11 @@ function ReceiptCard({ receipt, onOpen, onDelete }: { receipt: Receipt; onOpen()
 function ReceiptViewer({ receipt, onClose, onDelete }: { receipt: Receipt; onClose(): void; onDelete(): void }) {
   const canShowProcessed = receipt.status === "ready_for_extraction";
   const [showOriginal, setShowOriginal] = useState(!canShowProcessed);
-  const path = showOriginal ? receipt.storagePath : displayStoragePath(receipt);
+  const showingProcessed = receipt.status === "ready_for_extraction" && !showOriginal;
+  const path = showingProcessed ? receipt.processedStoragePath : receipt.storagePath;
   const { url, failed } = useReceiptImage(path);
-  const shownType = showOriginal || receipt.status === "stored" ? receipt.contentType : receipt.processedContentType;
-  const shownSize = showOriginal || receipt.status === "stored" ? receipt.size : receipt.processedSize;
+  const shownType = showingProcessed ? receipt.processedContentType : receipt.contentType;
+  const shownSize = showingProcessed ? receipt.processedSize : receipt.size;
   return (
     <div className="viewer-backdrop" role="dialog" aria-modal="true" aria-label={receipt.originalFileName} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <div className="viewer">
@@ -319,19 +406,19 @@ function ReceiptViewer({ receipt, onClose, onDelete }: { receipt: Receipt; onClo
         </div>
         <div className="viewer-image">
           {url ? (
-            showOriginal && receipt.contentType === "application/pdf" ? (
+            !showingProcessed && receipt.contentType === "application/pdf" ? (
               <object className="viewer-pdf" data={url} type="application/pdf" aria-label={`Original ${receipt.originalFileName}`}>
                 <a href={url} download={receipt.originalFileName}>Download the original PDF</a>
               </object>
             ) : (
               // Object URLs are private, authenticated blobs and should not use Next's server image optimizer.
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={url} alt={`${showOriginal ? "Original" : "Processed"} ${receipt.originalFileName}`} />
+              <img src={url} alt={`${showingProcessed ? "Processed" : "Original"} ${receipt.originalFileName}`} />
             )
           ) : <span>{failed ? "This browser cannot preview the image, but it is stored." : "Loading image…"}</span>}
         </div>
         <div className="viewer-footer">
-          <span>{showOriginal ? "Original" : "Processed"} · {shownType} · {formatBytes(shownSize)}</span>
+          <span>{showingProcessed ? "Processed" : "Original"} · {shownType} · {formatBytes(shownSize)}</span>
           <button className="danger-button" onClick={onDelete}>Delete receipt</button>
         </div>
       </div>

@@ -1,0 +1,27 @@
+{
+  "name": "fido-functions",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@firebase/app": "^0.16.0",
+    "@firebase/app-compat": "^0.5.16",
+    "firebase-admin": "^14.2.0",
+    "firebase-functions": "^7.0.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.11",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}

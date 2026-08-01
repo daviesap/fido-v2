@@ -54,6 +54,12 @@ img { display: block; max-width: 100%; }
 .upload-button span { display: grid; place-items: center; width: 25px; height: 25px; border: 2px solid var(--ink); border-radius: 7px; }
 .progress { position: absolute; left: 40px; right: 40px; bottom: 24px; height: 3px; background: rgba(255,255,255,.15); }
 .progress span { display: block; height: 100%; background: var(--yellow); transition: width .2s; }
+.email-receipt-card { display: grid; grid-template-columns: minmax(0,1fr) minmax(280px, 420px); align-items: center; gap: 30px; margin-bottom: 18px; padding: 28px 34px; color: #f8f2e5; background: #285442; border-radius: 14px; }
+.email-receipt-card h2 { margin: 0 0 8px; font-size: clamp(24px, 3vw, 32px); letter-spacing: -.04em; }
+.email-receipt-card p:last-child { margin: 0; color: rgba(248,242,229,.7); line-height: 1.5; }
+.email-receipt-card > button { display: flex; align-items: center; justify-content: space-between; gap: 15px; min-width: 0; min-height: 56px; padding: 0 18px; color: var(--ink); background: var(--surface); border: 0; border-radius: 8px 16px 8px 16px; cursor: pointer; }
+.email-receipt-card > button span { overflow: hidden; text-overflow: ellipsis; font: 500 13px "DM Mono", monospace; }
+.email-receipt-card > button strong { color: var(--orange); font-size: 12px; }
 .message { margin: 18px 0 0; padding: 12px 15px; color: #285442; background: #dce9dc; border: 1px solid #bed3c1; border-radius: 9px; }
 .message.error { color: #7e2c1c; background: #f5dcd5; border-color: #e5b7aa; }
 
@@ -76,7 +82,14 @@ img { display: block; max-width: 100%; }
 .receipt-info small { color: var(--muted); }
 .status-pill { align-self: flex-start; padding: 4px 7px; color: #6b5640; background: #ece3d0; border-radius: 999px; font: 500 9px "DM Mono", monospace; letter-spacing: .08em; text-transform: uppercase; }
 .status-pill.ready { color: #285442; background: #dce9dc; }
-.delete-button { padding: 4px 16px 16px; color: #b44832; font-size: 12px; }
+.status-pill.attention { color: #7e4625; background: #f8e8d1; }
+.email-origin { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.receipt-card-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 16px 16px; }
+.receipt-card-actions .delete-button { padding: 0; }
+.delete-button { color: #b44832; font-size: 12px; }
+.review-button { min-height: 34px; padding: 0 12px; color: var(--ink); background: var(--yellow); border: 0; border-radius: 6px 11px 6px 11px; font-size: 12px; font-weight: 700; cursor: pointer; }
+.pdf-placeholder { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.pdf-placeholder strong { display: grid; place-items: center; width: 52px; height: 62px; color: white; background: var(--orange); border-radius: 4px 12px 4px 4px; font: 700 12px "DM Mono", monospace; }
 
 .viewer-backdrop { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 24px; background: rgba(15,31,27,.78); backdrop-filter: blur(8px); }
 .viewer { display: grid; grid-template-rows: auto minmax(0,1fr) auto; width: min(900px, 100%); height: min(880px, 100%); overflow: hidden; background: var(--surface); border-radius: 16px; box-shadow: 0 40px 110px rgba(0,0,0,.4); }
@@ -133,6 +146,7 @@ img { display: block; max-width: 100%; }
   .page { width: min(100% - 28px, 620px); padding: 42px 0 80px; }
   .intro h1 { font-size: clamp(52px, 15vw, 74px); }
   .upload-card { min-height: 340px; padding: 30px; border-radius: 5px 34px 5px 34px; }
+  .email-receipt-card { grid-template-columns: 1fr; padding: 26px; }
   .upload-button { left: 30px; right: 30px; bottom: 30px; }
   .progress { left: 30px; right: 30px; bottom: 18px; }
   .receipt-grid { grid-template-columns: 1fr 1fr; gap: 12px; }

@@ -10,8 +10,8 @@ The roadmap is deliberately incremental. Each stage should leave the app usable,
 | --- | --- | --- |
 | 1 | Upload and privately store a receipt | Complete |
 | 2 | Crop, rotate, and improve the receipt image | Complete |
-| 3 | Email receipts into Fido | Next |
-| 4 | Extract structured receipt data with OpenAI | Planned |
+| 3 | Email receipts into Fido | Complete |
+| 4 | Extract structured receipt data with OpenAI | Next |
 | 5 | Connect a live FreeAgent account securely | Planned |
 | 6 | Import and display FreeAgent bank transactions | Planned |
 | 7 | Suggest transaction-to-receipt matches | Planned |
@@ -82,7 +82,28 @@ The user can approve a legible, correctly oriented receipt image, and both the u
 
 ### Architecture first
 
-Inbound email requires a trusted server-side component and an email receiving service that can deliver signed webhooks or events. The receiving endpoint should run in a Firebase Cloud Function or Cloud Run service. It must authenticate the email provider before accepting content; the static browser application must not hold inbound-email credentials.
+`receipts@flair.london` remains hosted by Google Mail. A Gmail attachment filter forwards to a private address on the isolated `ingest.flair.london` subdomain, where a Cloudflare Email Worker parses attachments and sends an HMAC-signed payload to a Firebase HTTPS Function. This keeps the existing Google Mail MX records untouched and keeps the private forwarding address and shared secret out of the browser.
+
+### Implemented
+
+- Cloudflare Email Worker with MIME parsing, inline-image filtering, attachment/count/size limits, and exact-recipient checks.
+- HMAC-SHA256 payload signing with a timestamp and nonce.
+- Firebase HTTPS Function with signature verification, strict payload parsing, byte-level file detection, rate limiting, deterministic deduplication, and private original storage.
+- `needs_review` receipt state with immutable email provenance and owner-only review transition rules.
+- In-app email instructions, queue badges, PDF/image review, and removal.
+- Separate Firebase and Cloudflare secret configuration with no committed credentials.
+- Setup and end-to-end test instructions in `docs/EMAIL_INGESTION.md`.
+- Production deployment using Gmail, Cloudflare Email Routing on the isolated `ingest.flair.london` subdomain, a Cloudflare Email Worker, and a Firebase HTTPS Function.
+- End-to-end production verification: a PDF sent to `receipts@flair.london` was ingested exactly once, stored privately, shown as **Needs review**, and successfully opened in the review flow.
+
+### Operational follow-ups
+
+These are useful hardening improvements rather than blockers for the working single-owner flow, and can be completed as part of Stage 9:
+
+- Add an in-app delivery activity/failure view and a retry or dead-letter recovery path.
+- Add optional sender allowlist management and private-address rotation controls.
+- Add abuse alerts and a minimal acknowledgement or rejection email.
+- Test multiple attachments and common image formats against production routing in addition to the verified PDF path.
 
 ### Scope
 
