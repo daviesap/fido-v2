@@ -170,7 +170,11 @@ service cloud.firestore {
       allow create: if isOwner()
         && (isStoredOriginal(receiptId) || isReviewedReceipt(receiptId));
 
-      allow delete: if isOwner() && resource.data.ownerUid == request.auth.uid;
+      allow delete: if isOwner()
+        && resource.data.ownerUid == request.auth.uid
+        && !(resource.data.keys().hasAll(['delivery'])
+          && resource.data.delivery is map
+          && resource.data.delivery.state == 'sent');
       allow update: if isOwner()
         && resource.data.ownerUid == request.auth.uid
         && (isEmailReviewUpdate(receiptId) || isVerificationUpdate());

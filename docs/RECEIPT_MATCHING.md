@@ -34,6 +34,8 @@ The bands are only a deterministic sanity check and are not presented or stored 
 
 When a receipt was paid personally or with cash, the server fetches the current company categories from `GET /v2/categories`. Only `admin_expenses_categories` and `cost_of_sales_categories` are offered. The owner must choose the category; OpenAI is not involved.
 
+Categories are intentionally fetched on demand rather than synchronised into a long-lived local catalogue. They change rarely, but this keeps the picker current without adding a background sync system. The selected category URL and its display metadata are stored in the private proposal, and the URL will be checked against a fresh category response again immediately before the future Expense write.
+
 The saved proposal contains:
 
 - FreeAgent claimant identity;
@@ -54,7 +56,7 @@ Deleting a receipt removes its proposal. Disconnecting FreeAgent removes the tra
 
 ## Stage 8 hand-off
 
-Stage 8 will read the private proposal, show the exact remote change, and require a separate confirmation before it makes a FreeAgent write. It must revalidate the transaction or category, attach the processed JPEG, use duplicate guards, and read the created or updated record back from FreeAgent.
+Stage 8A reads a bank-transaction proposal, shows the live existing explanation, and requires a separate confirmation before attaching the processed JPEG. It displays the current explanation category but never submits or changes that category. Split, partial, locked, oversized, or conflicting attachments are blocked; successful writes are read back and audited. Stage 8B will apply the same preview-and-confirm pattern to out-of-pocket Expense creation.
 
 Official API references:
 

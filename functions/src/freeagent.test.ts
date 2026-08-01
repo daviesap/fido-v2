@@ -6,12 +6,15 @@ import {
   decryptSecret,
   encryptSecret,
   exchangeFreeAgentCode,
+  fetchFreeAgentBankTransaction,
+  fetchFreeAgentBankTransactionExplanation,
   fetchFreeAgentBankAccounts,
   fetchFreeAgentBankTransactions,
   fetchFreeAgentIdentity,
   fetchFreeAgentSpendingCategories,
   FreeAgentRequestError,
   refreshFreeAgentTokens,
+  updateFreeAgentExplanationAttachment,
 } from "./freeagent.js";
 
 const key = Buffer.alloc(32, 7).toString("base64");
@@ -177,7 +180,21 @@ describe("FreeAgent OAuth", () => {
         unexplained_amount: "-12.40",
         transaction_id: "fit-8",
         updated_at: "2026-07-31T13:00:00Z",
-        bank_transaction_explanations: [{ secret: "not retained" }],
+        bank_transaction_explanations: [{
+          url: "https://api.freeagent.com/v2/bank_transaction_explanations/20",
+          bank_transaction: "https://api.freeagent.com/v2/bank_transactions/8",
+          bank_account: "https://api.freeagent.com/v2/bank_accounts/1",
+          type: "Payment",
+          category: "https://api.freeagent.com/v2/categories/285",
+          dated_on: "2026-07-31",
+          description: "Meal",
+          gross_value: "-12.40",
+          updated_at: "2026-07-31T13:00:00Z",
+          is_locked: false,
+          locked_reason: null,
+          attachment: null,
+          secret: "not retained",
+        }],
       }] }), { status: 200, headers: { "content-type": "application/json", "x-total-count": "1" } });
     };
 
@@ -203,7 +220,116 @@ describe("FreeAgent OAuth", () => {
       unexplainedAmount: "-12.40",
       transactionId: "fit-8",
       updatedAt: "2026-07-31T13:00:00Z",
+      explanations: [{
+        id: "20",
+        url: "https://api.freeagent.com/v2/bank_transaction_explanations/20",
+        type: "Payment",
+        categoryUrl: "https://api.freeagent.com/v2/categories/285",
+        datedOn: "2026-07-31",
+        description: "Meal",
+        grossValue: "-12.40",
+        updatedAt: "2026-07-31T13:00:00Z",
+        isLocked: false,
+        lockedReason: null,
+        attachment: null,
+      }],
     }]);
+  });
+
+  it("reads and updates only an existing explanation attachment", async () => {
+    const requests: { url: string; init?: RequestInit }[] = [];
+    const explanation = {
+      url: "https://api.freeagent.com/v2/bank_transaction_explanations/20",
+      bank_transaction: "https://api.freeagent.com/v2/bank_transactions/8",
+      bank_account: "https://api.freeagent.com/v2/bank_accounts/1",
+      type: "Payment",
+      category: "https://api.freeagent.com/v2/categories/285",
+      dated_on: "2026-07-31",
+      description: "Cloud hosting",
+      gross_value: "-3.58",
+      updated_at: "2026-07-31T13:00:00Z",
+      is_locked: false,
+      attachment: null,
+    };
+    const transaction = {
+      url: "https://api.freeagent.com/v2/bank_transactions/8",
+      amount: "-3.58",
+      bank_account: "https://api.freeagent.com/v2/bank_accounts/1",
+      dated_on: "2026-07-31",
+      description: "DIGITALOCEAN",
+      full_description: "DIGITALOCEAN/OTHER/GBP 3.58",
+      unexplained_amount: "0.00",
+      transaction_id: "fit-8",
+      updated_at: "2026-07-31T13:00:00Z",
+      bank_transaction_explanations: [explanation],
+    };
+    const singleExplanationResponse = {
+      bank_transaction: explanation.bank_transaction,
+      bank_account: explanation.bank_account,
+      dated_on: explanation.dated_on,
+      description: explanation.description,
+      gross_value: explanation.gross_value,
+      updated_at: explanation.updated_at,
+      attachment: null,
+    };
+    const fetchImpl = async (url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(url), init });
+      if (init?.method === "PUT") {
+        return new Response(JSON.stringify({
+          bank_transaction_explanation: {
+            ...explanation,
+            updated_at: "2026-08-01T18:00:00Z",
+            attachment: {
+              url: "https://api.freeagent.com/v2/attachments/99",
+              content_type: "image/jpeg",
+              file_name: "fido-receipt-1.jpg",
+              file_size: 1234,
+            },
+          },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify(String(url).includes("bank_transactions/8")
+        ? { bank_transaction: transaction }
+        : { bank_transaction_explanation: singleExplanationResponse }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+
+    const fetchedTransaction = await fetchFreeAgentBankTransaction({
+      accessToken: "access",
+      transactionUrl: transaction.url,
+      fetchImpl,
+    });
+    expect(fetchedTransaction.explanations).toHaveLength(1);
+    await expect(fetchFreeAgentBankTransactionExplanation({
+      accessToken: "access",
+      explanationUrl: explanation.url,
+      fallback: fetchedTransaction.explanations[0],
+      fetchImpl,
+    })).resolves.toMatchObject({ categoryUrl: explanation.category, attachment: null, isLocked: false });
+    const updated = await updateFreeAgentExplanationAttachment({
+      accessToken: "access",
+      explanationUrl: explanation.url,
+      attachment: {
+        data: "base64-image",
+        fileName: "fido-receipt-1.jpg",
+        description: "Fido receipt",
+        contentType: "image/jpeg",
+      },
+      fetchImpl,
+    });
+    expect(updated.attachment).toMatchObject({ id: "99", fileName: "fido-receipt-1.jpg", fileSize: 1234 });
+    const putBody = JSON.parse(String(requests.find((request) => request.init?.method === "PUT")?.init?.body));
+    expect(putBody).toEqual({
+      bank_transaction_explanation: {
+        attachment: {
+          data: "base64-image",
+          file_name: "fido-receipt-1.jpg",
+          description: "Fido receipt",
+          content_type: "image/jpeg",
+        },
+      },
+    });
+    expect(putBody.bank_transaction_explanation).not.toHaveProperty("category");
+    expect(putBody.bank_transaction_explanation).not.toHaveProperty("gross_value");
   });
 
   it("returns only the spending categories needed for expenses", async () => {
