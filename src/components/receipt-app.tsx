@@ -454,10 +454,8 @@ function ReceiptCard({
   const extracted = receipt.status === "ready_for_extraction" && receipt.extraction?.state === "ready_for_verification"
     ? receipt.extraction.result
     : null;
-  const displayName = receipt.status === "verified" ? receipt.verifiedData.merchantName : extracted?.merchantName ?? receipt.originalFileName;
-  const total = receipt.status === "verified"
-    ? `${receipt.verifiedData.currency} ${receipt.verifiedData.grossTotal}`
-    : extracted?.currency && extracted.grossTotal ? `${extracted.currency} ${extracted.grossTotal}` : null;
+  const values = receipt.status === "verified" ? receipt.verifiedData : extracted;
+  const displayName = values?.merchantName ?? receipt.originalFileName;
   return (
     <article className="receipt-card">
       <button className="receipt-preview" onClick={onOpen} aria-label={`View ${receipt.originalFileName}`} disabled={opening}>
@@ -474,9 +472,32 @@ function ReceiptCard({
           {receiptStatusLabel(receipt)}
         </span>
         <strong title={receipt.originalFileName}>{displayName}</strong>
-        {total && <small className="receipt-total">{total}</small>}
+        {values && (
+          <dl className="receipt-values">
+            <div className="receipt-value-date">
+              <dt>Receipt date</dt>
+              <dd>{formatReceiptDate(values.receiptDate)}</dd>
+            </div>
+            <div>
+              <dt>Currency</dt>
+              <dd>{values.currency ?? "—"}</dd>
+            </div>
+            <div>
+              <dt>Gross</dt>
+              <dd>{values.grossTotal ?? "—"}</dd>
+            </div>
+            <div>
+              <dt>Net</dt>
+              <dd>{values.netTotal ?? "—"}</dd>
+            </div>
+            <div>
+              <dt>VAT</dt>
+              <dd>{values.vatTotal ?? "—"}</dd>
+            </div>
+          </dl>
+        )}
         {needsReview && <small className="email-origin">From {receipt.email.sender}</small>}
-        <small>{date ? date.toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }) : "Just now"} · {formatBytes(receipt.size)}</small>
+        <small>Added {date ? date.toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }) : "just now"} · {formatBytes(receipt.size)}</small>
       </div>
       <div className="receipt-card-actions">
         {needsReview && <button className="review-button" onClick={onReview} disabled={opening}>{opening ? "Opening…" : "Review receipt"}</button>}
@@ -489,6 +510,16 @@ function ReceiptCard({
       </div>
     </article>
   );
+}
+
+function formatReceiptDate(value: string | null): string {
+  if (!value) return "—";
+  return new Date(`${value}T00:00:00Z`).toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  });
 }
 
 function ReceiptViewer({ receipt, onClose, onDelete }: { receipt: Receipt; onClose(): void; onDelete(): void }) {

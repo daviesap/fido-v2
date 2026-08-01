@@ -90,7 +90,11 @@ img { display: block; max-width: 100%; }
 .status-pill.needs_review, .status-pill.ready_to_verify { color: #7e4625; background: #f8e8d1; }
 .status-pill.extracting { color: #345b75; background: #dce9ef; }
 .status-pill.problems { color: #8b2f21; background: #f5dcd5; }
-.receipt-total { color: var(--ink) !important; font: 500 13px "DM Mono", monospace; }
+.receipt-values { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 12px; margin: 5px 0 3px; padding: 12px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.receipt-values div { min-width: 0; }
+.receipt-values .receipt-value-date { grid-column: span 2; }
+.receipt-values dt { margin-bottom: 3px; color: var(--muted); font: 500 8px "DM Mono", monospace; letter-spacing: .08em; text-transform: uppercase; }
+.receipt-values dd { margin: 0; overflow: hidden; color: var(--ink); font: 500 12px "DM Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
 .email-origin { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .receipt-card-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 16px 16px; }
 .receipt-card-actions .delete-button { padding: 0; }
