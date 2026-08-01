@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { httpsCallable } from "firebase/functions";
+import { FreeAgentBanking } from "@/components/freeagent-banking";
 import { functions } from "@/lib/firebase";
 
 type FreeAgentConnection = {
@@ -126,6 +127,8 @@ export function FreeAgentConnectionCard() {
 
       {message && <p className="message">{message}</p>}
       {error && <p className="message error" role="alert">{error}</p>}
+
+      {connection?.connected ? <FreeAgentBanking /> : null}
 
       <div className="freeagent-actions">
         {connection?.connected ? (

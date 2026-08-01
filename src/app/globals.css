@@ -73,6 +73,53 @@ img { display: block; max-width: 100%; }
 .freeagent-details dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .freeagent-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 18px; }
 .freeagent-actions .delete-button { margin-left: 6px; }
+.freeagent-banking-loading { margin: 22px 0 0; padding: 20px 0 0; color: var(--muted); border-top: 1px solid var(--line); }
+.freeagent-banking { margin-top: 22px; padding-top: 24px; border-top: 1px solid var(--line); }
+.freeagent-banking.compact { padding-top: 18px; }
+.banking-summary { display: flex; align-items: center; justify-content: space-between; gap: 22px; }
+.banking-summary h3 { margin: 0 0 4px; font-size: 19px; letter-spacing: -.03em; }
+.banking-summary p:last-child { margin: 0; color: var(--muted); font-size: 11px; }
+.banking-summary-actions { display: flex; flex: 0 0 auto; gap: 8px; }
+.banking-summary-actions button { min-height: 40px; padding: 0 14px; }
+.freeagent-banking-heading, .transaction-browser-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.freeagent-banking-heading-actions { display: flex; align-items: center; gap: 12px; }
+.freeagent-banking-heading-actions .text-button { font-size: 11px; }
+.freeagent-banking-heading h3, .transaction-browser-heading h3 { margin: 0 0 6px; font-size: 23px; letter-spacing: -.035em; }
+.freeagent-banking-heading p:last-child { max-width: 650px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.bank-account-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 18px 0 0; padding: 0; border: 0; }
+.bank-account-picker label { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 11px; min-width: 0; padding: 13px 14px; background: #f4f1ea; border: 1px solid var(--line); border-radius: 9px; cursor: pointer; }
+.bank-account-picker label.selected { background: #edf4ed; border-color: #a9c5af; }
+.bank-account-picker input { width: 17px; height: 17px; accent-color: #285442; }
+.bank-account-picker span { display: flex; flex-direction: column; min-width: 0; }
+.bank-account-picker strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.bank-account-picker small { margin-top: 3px; color: var(--muted); font-size: 10px; }
+.bank-account-picker b { color: var(--muted); font: 500 10px "DM Mono", monospace; }
+.bank-account-note { margin: 10px 0 0; color: var(--muted); font-size: 11px; }
+.banking-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; margin-top: 16px; }
+.banking-actions > span { margin-right: auto; color: var(--muted); font-size: 11px; }
+.banking-actions button { min-height: 42px; padding: 0 15px; }
+.transaction-browser { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--line); }
+.transaction-browser-heading { align-items: center; }
+.transaction-browser-heading h3 { margin-bottom: 0; }
+.transaction-filters { display: grid; grid-template-columns: 1.3fr 1fr 1fr 1fr; gap: 8px; margin: 16px 0; }
+.transaction-filters label { color: var(--muted); font: 500 8px "DM Mono", monospace; letter-spacing: .07em; text-transform: uppercase; }
+.transaction-filters select, .transaction-filters input { display: block; width: 100%; min-height: 39px; margin-top: 5px; padding: 0 9px; color: var(--ink); background: white; border: 1px solid var(--line); border-radius: 7px; font: inherit; font-size: 11px; text-transform: none; }
+.transaction-list { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; }
+.transaction-list article { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 20px; padding: 13px 15px; background: white; border-bottom: 1px solid var(--line); }
+.transaction-list article:last-child { border-bottom: 0; }
+.transaction-list article > div:first-child { display: flex; flex-direction: column; min-width: 0; }
+.transaction-list article > div:first-child strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.transaction-list article small { margin-top: 4px; color: var(--muted); font-size: 10px; }
+.transaction-amount { display: flex; align-items: flex-end; flex-direction: column; gap: 4px; }
+.transaction-amount > strong { font: 500 12px "DM Mono", monospace; }
+.transaction-status { color: #285442; font: 500 8px "DM Mono", monospace; letter-spacing: .06em; text-transform: uppercase; }
+.transaction-status.unexplained { color: #a5522f; }
+.transaction-empty { margin: 0; padding: 30px 18px; color: var(--muted); background: #f4f1ea; border-radius: 10px; text-align: center; font-size: 12px; }
+.out-of-pocket-note { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 13px; margin-top: 18px; padding: 16px; color: #f8f2e5; background: #285442; border-radius: 9px 16px 9px 16px; }
+.out-of-pocket-note > span { display: grid; place-items: center; width: 34px; height: 34px; color: var(--ink); background: var(--yellow); border-radius: 50%; font-size: 17px; }
+.out-of-pocket-note strong { font-size: 13px; }
+.out-of-pocket-note p { margin: 4px 0 0; color: rgba(248,242,229,.72); font-size: 11px; line-height: 1.45; }
+.out-of-pocket-note em { padding: 5px 7px; color: #285442; background: #dce9dc; border-radius: 999px; font: 500 8px "DM Mono", monospace; font-style: normal; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
 .message { margin: 18px 0 0; padding: 12px 15px; color: #285442; background: #dce9dc; border: 1px solid #bed3c1; border-radius: 9px; }
 .message.error { color: #7e2c1c; background: #f5dcd5; border-color: #e5b7aa; }
 
@@ -200,6 +247,14 @@ img { display: block; max-width: 100%; }
   .freeagent-details { grid-template-columns: 1fr; }
   .freeagent-actions { align-items: stretch; flex-direction: column; }
   .freeagent-actions .delete-button { min-height: 40px; margin-left: 0; }
+  .bank-account-picker { grid-template-columns: 1fr; }
+  .banking-summary { align-items: stretch; flex-direction: column; }
+  .banking-summary-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .banking-actions { align-items: stretch; flex-direction: column; }
+  .banking-actions > span { margin: 0 0 3px; }
+  .transaction-filters { grid-template-columns: 1fr 1fr; }
+  .out-of-pocket-note { grid-template-columns: auto minmax(0,1fr); }
+  .out-of-pocket-note em { display: none; }
   .upload-button { left: 30px; right: 30px; bottom: 30px; }
   .progress { left: 30px; right: 30px; bottom: 18px; }
   .receipt-grid { grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -226,6 +281,9 @@ img { display: block; max-width: 100%; }
 }
 
 @media (max-width: 480px) {
+  .transaction-filters { grid-template-columns: 1fr; }
+  .transaction-list article { gap: 10px; padding: 12px; }
+  .transaction-list article > div:first-child strong { max-width: 180px; }
   .receipt-grid { grid-template-columns: 1fr; }
   .receipt-preview { height: 250px; }
   .review-header { padding: 18px; }

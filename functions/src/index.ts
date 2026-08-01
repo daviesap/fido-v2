@@ -34,9 +34,13 @@ import {
   decryptSecret,
   encryptSecret,
   exchangeFreeAgentCode,
+  fetchFreeAgentBankAccounts,
+  fetchFreeAgentBankTransactions,
   fetchFreeAgentIdentity,
   refreshFreeAgentTokens,
   type EncryptedSecret,
+  type FreeAgentBankAccount,
+  type FreeAgentBankTransaction,
   type FreeAgentIdentity,
   type FreeAgentTokens,
 } from "./freeagent.js";
@@ -54,6 +58,11 @@ const EXTRACTION_FUNCTION_NAME = "extractReceipt";
 const EXTRACTION_FUNCTION_RESOURCE = `locations/europe-west1/functions/${EXTRACTION_FUNCTION_NAME}`;
 const MAX_EXTRACTION_ATTEMPTS = 3;
 const FREEAGENT_STATE_LIFETIME_MS = 10 * 60 * 1000;
+const FREEAGENT_SYNC_WINDOW_DAYS = 90;
+
+const FreeAgentAccountSelectionSchema = z.object({
+  accountIds: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/)).min(1).max(20),
+}).strict();
 
 const ExtractionTaskSchema = z.object({
   receiptId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
@@ -345,15 +354,7 @@ export const verifyFreeAgentConnection = onCall({
   timeoutSeconds: 60,
 }, async (request) => {
   const ownerUid = requireOwner(request.auth);
-  let accessToken = await validFreeAgentAccessToken(ownerUid, false);
-  let identity: FreeAgentIdentity;
-  try {
-    identity = await fetchFreeAgentIdentity(accessToken);
-  } catch (cause) {
-    if (!(cause instanceof FreeAgentRequestError) || cause.status !== 401) throw cause;
-    accessToken = await validFreeAgentAccessToken(ownerUid, true);
-    identity = await fetchFreeAgentIdentity(accessToken);
-  }
+  const identity = await withFreeAgentAccessToken(ownerUid, (accessToken) => fetchFreeAgentIdentity(accessToken));
   await freeAgentConnectionRef(ownerUid).set({
     profile: identity.user,
     company: identity.company,
@@ -364,11 +365,129 @@ export const verifyFreeAgentConnection = onCall({
   return publicFreeAgentConnection(updated.data()!);
 });
 
+export const getFreeAgentBanking = onCall({
+  region: "europe-west1",
+  secrets: [freeAgentClientId, freeAgentClientSecret, freeAgentTokenEncryptionKey],
+  timeoutSeconds: 60,
+}, async (request) => {
+  const ownerUid = requireOwner(request.auth);
+  try {
+    const accounts = await withFreeAgentAccessToken(ownerUid, (accessToken) => fetchFreeAgentBankAccounts(accessToken));
+    return bankingState(ownerUid, accounts);
+  } catch (cause) {
+    throw freeAgentCallableError(cause, "FreeAgent bank accounts could not be loaded.");
+  }
+});
+
+export const saveFreeAgentBankAccounts = onCall({
+  region: "europe-west1",
+  secrets: [freeAgentClientId, freeAgentClientSecret, freeAgentTokenEncryptionKey],
+  timeoutSeconds: 60,
+}, async (request) => {
+  const ownerUid = requireOwner(request.auth);
+  const parsed = FreeAgentAccountSelectionSchema.safeParse(request.data);
+  if (!parsed.success) throw new HttpsError("invalid-argument", "Select at least one valid bank account.");
+  try {
+    const accounts = await withFreeAgentAccessToken(ownerUid, (accessToken) => fetchFreeAgentBankAccounts(accessToken));
+    const selectable = new Map(accounts
+      .filter((account) => account.status === "active" && account.currency === "GBP")
+      .map((account) => [account.id, account]));
+    const selectedIds = [...new Set(parsed.data.accountIds)];
+    const selectedAccounts = selectedIds.map((id) => selectable.get(id));
+    if (selectedAccounts.some((account) => !account)) {
+      throw new HttpsError("invalid-argument", "Only active GBP accounts can participate in matching.");
+    }
+    await freeAgentSyncRef(ownerUid).set({
+      ownerUid,
+      selectedAccounts,
+      syncWindowDays: FREEAGENT_SYNC_WINDOW_DAYS,
+      selectionUpdatedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+    await deleteUnselectedTransactions(ownerUid, new Set(selectedIds));
+    return bankingState(ownerUid, accounts);
+  } catch (cause) {
+    if (cause instanceof HttpsError) throw cause;
+    throw freeAgentCallableError(cause, "The account selection could not be saved.");
+  }
+});
+
+export const syncFreeAgentTransactions = onCall({
+  region: "europe-west1",
+  secrets: [freeAgentClientId, freeAgentClientSecret, freeAgentTokenEncryptionKey],
+  timeoutSeconds: 180,
+  maxInstances: 2,
+}, async (request) => {
+  const ownerUid = requireOwner(request.auth);
+  const syncRef = freeAgentSyncRef(ownerUid);
+  const config = await syncRef.get();
+  const selectedAccounts = parseStoredSelectedAccounts(config.get("selectedAccounts"));
+  if (!selectedAccounts.length) throw new HttpsError("failed-precondition", "Choose at least one GBP account before syncing.");
+
+  const runId = randomBytes(12).toString("hex");
+  const { fromDate, toDate } = freeAgentSyncWindow(new Date());
+  await syncRef.set({
+    syncStatus: "syncing",
+    syncRunId: runId,
+    syncStartedAt: FieldValue.serverTimestamp(),
+    syncFromDate: fromDate,
+    syncToDate: toDate,
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  try {
+    const accounts = await withFreeAgentAccessToken(ownerUid, (accessToken) => fetchFreeAgentBankAccounts(accessToken));
+    const currentAccounts = new Map(accounts.map((account) => [account.id, account]));
+    const validAccounts = selectedAccounts.map((selected) => currentAccounts.get(selected.id));
+    if (validAccounts.some((account) => !account || account.status !== "active" || account.currency !== "GBP")) {
+      throw new HttpsError("failed-precondition", "A selected account is no longer an active GBP account. Review the selection.");
+    }
+
+    const transactions = await withFreeAgentAccessToken(ownerUid, async (accessToken) => {
+      const fetched: FreeAgentBankTransaction[] = [];
+      for (const account of validAccounts as FreeAgentBankAccount[]) {
+        fetched.push(...await fetchFreeAgentBankTransactions({
+          accessToken,
+          bankAccountUrl: account.url,
+          fromDate,
+          toDate,
+        }));
+      }
+      return fetched;
+    });
+    await replaceFreeAgentTransactionWindow(ownerUid, validAccounts as FreeAgentBankAccount[], transactions, {
+      runId,
+      fromDate,
+      toDate,
+    });
+    await syncRef.set({
+      selectedAccounts: validAccounts,
+      syncStatus: "ready",
+      transactionCount: transactions.length,
+      lastSyncCompletedAt: FieldValue.serverTimestamp(),
+      lastSyncErrorCode: FieldValue.delete(),
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+    return bankingState(ownerUid, accounts);
+  } catch (cause) {
+    const errorCode = freeAgentErrorCode(cause);
+    await syncRef.set({
+      syncStatus: "failed",
+      lastSyncErrorCode: errorCode,
+      lastSyncFailedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+    if (cause instanceof HttpsError) throw cause;
+    throw freeAgentCallableError(cause, "FreeAgent transactions could not be synchronised.");
+  }
+});
+
 export const disconnectFreeAgent = onCall({
   region: "europe-west1",
   timeoutSeconds: 30,
 }, async (request) => {
   const ownerUid = requireOwner(request.auth);
+  await getFirestore().recursiveDelete(freeAgentSyncRef(ownerUid));
   await freeAgentConnectionRef(ownerUid).delete();
   return { connected: false as const };
 });
@@ -381,6 +500,14 @@ function requireOwner(auth: { uid: string; token: Record<string, unknown> } | un
 
 function freeAgentConnectionRef(ownerUid: string) {
   return getFirestore().collection("freeAgentConnections").doc(ownerUid);
+}
+
+function freeAgentSyncRef(ownerUid: string) {
+  return getFirestore().collection("freeAgentSync").doc(ownerUid);
+}
+
+function freeAgentTransactionsRef(ownerUid: string) {
+  return freeAgentSyncRef(ownerUid).collection("transactions");
 }
 
 async function storeFreeAgentConnection(
@@ -432,6 +559,165 @@ async function validFreeAgentAccessToken(ownerUid: string, forceRefresh: boolean
     company: connection.get("company") as FreeAgentIdentity["company"],
   }, false);
   return tokens.access_token;
+}
+
+async function withFreeAgentAccessToken<T>(
+  ownerUid: string,
+  operation: (accessToken: string) => Promise<T>,
+): Promise<T> {
+  let accessToken = await validFreeAgentAccessToken(ownerUid, false);
+  try {
+    return await operation(accessToken);
+  } catch (cause) {
+    if (!(cause instanceof FreeAgentRequestError) || cause.status !== 401) throw cause;
+    accessToken = await validFreeAgentAccessToken(ownerUid, true);
+    return operation(accessToken);
+  }
+}
+
+async function bankingState(ownerUid: string, accounts: FreeAgentBankAccount[]) {
+  const [config, transactionSnapshot] = await Promise.all([
+    freeAgentSyncRef(ownerUid).get(),
+    freeAgentTransactionsRef(ownerUid).get(),
+  ]);
+  const selectedAccounts = parseStoredSelectedAccounts(config.get("selectedAccounts"));
+  const selectedIds = new Set(selectedAccounts.map((account) => account.id));
+  const lastSyncCompletedAt = config.get("lastSyncCompletedAt") as Timestamp | undefined;
+  return {
+    accounts,
+    selectedAccountIds: [...selectedIds],
+    sync: {
+      status: config.get("syncStatus") === "failed" ? "failed" as const : "ready" as const,
+      windowDays: FREEAGENT_SYNC_WINDOW_DAYS,
+      fromDate: typeof config.get("syncFromDate") === "string" ? config.get("syncFromDate") as string : null,
+      toDate: typeof config.get("syncToDate") === "string" ? config.get("syncToDate") as string : null,
+      lastCompletedAt: lastSyncCompletedAt?.toDate().toISOString() ?? null,
+      transactionCount: transactionSnapshot.size,
+    },
+    transactions: transactionSnapshot.docs
+      .map((document) => publicFreeAgentTransaction(document.data()))
+      .filter((transaction) => selectedIds.has(transaction.bankAccountId))
+      .sort((left, right) => right.datedOn.localeCompare(left.datedOn) || right.id.localeCompare(left.id)),
+    outOfPocket: {
+      supported: true as const,
+      writeEnabled: false as const,
+      message: "Receipts paid personally or with cash can be sent to FreeAgent as an out-of-pocket expense after explicit review.",
+    },
+  };
+}
+
+function publicFreeAgentTransaction(data: Record<string, unknown>) {
+  return {
+    id: String(data.id ?? ""),
+    url: String(data.url ?? ""),
+    bankAccountId: String(data.bankAccountId ?? ""),
+    bankAccountUrl: String(data.bankAccountUrl ?? ""),
+    bankAccountName: String(data.bankAccountName ?? ""),
+    currency: "GBP" as const,
+    datedOn: String(data.datedOn ?? ""),
+    amount: String(data.amount ?? ""),
+    description: String(data.description ?? ""),
+    fullDescription: String(data.fullDescription ?? ""),
+    unexplainedAmount: String(data.unexplainedAmount ?? ""),
+    transactionId: typeof data.transactionId === "string" ? data.transactionId : null,
+    updatedAt: String(data.updatedAt ?? ""),
+  };
+}
+
+function parseStoredSelectedAccounts(value: unknown): FreeAgentBankAccount[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate) => {
+    if (!candidate || typeof candidate !== "object") return [];
+    const account = candidate as Record<string, unknown>;
+    if (typeof account.id !== "string" || typeof account.url !== "string" || typeof account.name !== "string"
+      || typeof account.type !== "string" || account.currency !== "GBP" || typeof account.isPersonal !== "boolean"
+      || account.status !== "active") return [];
+    return [{
+      id: account.id,
+      url: account.url,
+      name: account.name,
+      type: account.type,
+      currency: "GBP",
+      isPersonal: account.isPersonal,
+      status: "active" as const,
+    }];
+  });
+}
+
+function freeAgentSyncWindow(now: Date) {
+  const to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const from = new Date(to);
+  from.setUTCDate(from.getUTCDate() - (FREEAGENT_SYNC_WINDOW_DAYS - 1));
+  return { fromDate: isoDate(from), toDate: isoDate(to) };
+}
+
+function isoDate(value: Date): string {
+  return value.toISOString().slice(0, 10);
+}
+
+async function replaceFreeAgentTransactionWindow(
+  ownerUid: string,
+  accounts: FreeAgentBankAccount[],
+  transactions: FreeAgentBankTransaction[],
+  sync: { runId: string; fromDate: string; toDate: string },
+): Promise<void> {
+  const collection = freeAgentTransactionsRef(ownerUid);
+  const accountNames = new Map(accounts.map((account) => [account.id, account.name]));
+  const seen = new Set<string>();
+  for (let offset = 0; offset < transactions.length; offset += 400) {
+    const batch = getFirestore().batch();
+    for (const transaction of transactions.slice(offset, offset + 400)) {
+      const documentId = hash(transaction.url);
+      seen.add(documentId);
+      batch.set(collection.doc(documentId), {
+        ownerUid,
+        ...transaction,
+        bankAccountName: accountNames.get(transaction.bankAccountId) ?? "FreeAgent account",
+        currency: "GBP",
+        syncRunId: sync.runId,
+        syncedAt: FieldValue.serverTimestamp(),
+      });
+    }
+    await batch.commit();
+  }
+
+  const selectedIds = new Set(accounts.map((account) => account.id));
+  const current = await collection.get();
+  const stale = current.docs.filter((document) => {
+    const data = document.data();
+    return selectedIds.has(String(data.bankAccountId))
+      && typeof data.datedOn === "string"
+      && data.datedOn >= sync.fromDate
+      && data.datedOn <= sync.toDate
+      && !seen.has(document.id);
+  });
+  await deleteFreeAgentTransactionDocuments(stale.map((document) => document.ref));
+}
+
+async function deleteUnselectedTransactions(ownerUid: string, selectedIds: Set<string>): Promise<void> {
+  const current = await freeAgentTransactionsRef(ownerUid).get();
+  await deleteFreeAgentTransactionDocuments(current.docs
+    .filter((document) => !selectedIds.has(String(document.get("bankAccountId"))))
+    .map((document) => document.ref));
+}
+
+async function deleteFreeAgentTransactionDocuments(references: DocumentReference[]): Promise<void> {
+  for (let offset = 0; offset < references.length; offset += 400) {
+    const batch = getFirestore().batch();
+    for (const reference of references.slice(offset, offset + 400)) batch.delete(reference);
+    await batch.commit();
+  }
+}
+
+function freeAgentCallableError(cause: unknown, fallback: string): HttpsError {
+  if (cause instanceof FreeAgentRequestError) {
+    logger.warn("FreeAgent API request failed", { errorCode: cause.code, upstreamStatus: cause.status });
+    if (cause.status === 401) return new HttpsError("failed-precondition", "Reconnect FreeAgent to continue.");
+    if (cause.status === 403) return new HttpsError("permission-denied", "The connected FreeAgent user needs Banking access.");
+    if (cause.status === 429) return new HttpsError("resource-exhausted", "FreeAgent is rate limiting requests. Try again shortly.");
+  }
+  logger.warn("FreeAgent operation failed", { errorCode: freeAgentErrorCode(cause) });
+  return new HttpsError("unavailable", fallback);
 }
 
 function publicFreeAgentConnection(data: Record<string, unknown>) {

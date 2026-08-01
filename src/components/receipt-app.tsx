@@ -278,9 +278,9 @@ export function ReceiptApp() {
       </header>
       <main className="page">
         <section className="intro">
-          <p className="eyebrow">Stage four · quiet automation</p>
-          <h1>Receipts ready when you are.</h1>
-          <p>Photograph, upload, or email a receipt. Fido keeps capture quick, extracts the useful totals in the background, and leaves a short verification queue for later.</p>
+          <p className="eyebrow">Stage six · read-only accounting</p>
+          <h1>Receipts ready to reconcile.</h1>
+          <p>Capture quickly, verify later, then compare each receipt with recent FreeAgent activity—or mark it as paid personally or with cash.</p>
         </section>
 
         <FreeAgentConnectionCard />

@@ -1,6 +1,6 @@
 # Fido Receipt Manager roadmap
 
-Fido's goal is to turn a photographed or emailed receipt into a reviewed, trustworthy match against a real FreeAgent bank transaction.
+Fido's goal is to turn a photographed or emailed receipt into either a reviewed, trustworthy match against a real FreeAgent bank transaction or an explicitly approved out-of-pocket FreeAgent expense.
 
 The roadmap is deliberately incremental. Each stage should leave the app usable, testable, and safe to deploy before the next integration is added. In particular, no match should change accounting data until the user has reviewed it.
 
@@ -12,10 +12,10 @@ The roadmap is deliberately incremental. Each stage should leave the app usable,
 | 2 | Crop, rotate, and improve the receipt image | Complete |
 | 3 | Email receipts into Fido | Complete |
 | 4 | Extract structured receipt data with OpenAI | Complete |
-| 5 | Connect a live FreeAgent account securely | In progress |
-| 6 | Import and display FreeAgent bank transactions | Planned |
-| 7 | Suggest transaction-to-receipt matches | Planned |
-| 8 | Confirm matches and send receipts to FreeAgent | Planned |
+| 5 | Connect a live FreeAgent account securely | Complete |
+| 6 | Import and display FreeAgent bank transactions | In progress |
+| 7 | Suggest matches or choose out-of-pocket treatment | Planned |
+| 8 | Confirm and send receipts or expenses to FreeAgent | Planned |
 | 9 | Harden, monitor, and prepare for regular use | Planned |
 
 ---
@@ -193,7 +193,7 @@ For the test set, Fido reliably extracts merchant, a short purchase description,
 
 **Goal:** securely authorise Fido to read the owner's FreeAgent data.
 
-### Implemented in the Stage 5 branch
+### Delivered
 
 - Production OAuth authorization-code flow through a fixed `fido.flair.london` callback.
 - Ten-minute, single-use OAuth state stored only as a SHA-256 document identifier.
@@ -220,13 +220,23 @@ FreeAgent uses OAuth 2.0 and issues an access token plus refresh token for each 
 
 ### Definition of done
 
-The owner can connect the intended sandbox account, then the live account, survive an access-token expiry, and disconnect without exposing any credentials to the browser or logs.
+The owner can connect and verify the intended live account, refresh an expired access token, and disconnect without exposing any credentials to the browser or logs.
 
 ---
 
 ## Stage 6 — Import and display FreeAgent bank transactions
 
 **Goal:** create a local, read-only view of the transactions that receipts may match.
+
+### Implemented in the Stage 6 branch
+
+- Owner-only discovery of active FreeAgent bank and credit-card accounts without retaining account numbers or balances.
+- Explicit account selection restricted to active GBP accounts.
+- Manual, read-only synchronisation of a rolling 90-day transaction window.
+- Pagination in 100-item pages, one refresh retry after a 401, and actionable permission/rate-limit failures.
+- Private, idempotent transaction cache with stale-window cleanup and cache deletion when an account is deselected or FreeAgent is disconnected.
+- Transaction browser filters for account, explained state, recent period, and minimum absolute amount.
+- A visible out-of-pocket route for receipts that will never have a participating bank transaction.
 
 ### Scope
 
@@ -236,7 +246,7 @@ The owner can connect the intended sandbox account, then the live account, survi
   - stable FreeAgent URL/identifier and transaction ID;
   - bank account;
   - transaction date;
-  - amount and currency;
+  - amount, with GBP derived from the selected account because the transaction resource does not contain a currency field;
   - description/full description;
   - unexplained amount and explanation state;
   - source `updated_at` value and local sync timestamp.
@@ -246,7 +256,7 @@ The owner can connect the intended sandbox account, then the live account, survi
 - Display transactions read-only with filters for account, date, amount, and explained state.
 - Decide and document retention: local cache versus fetch-on-demand.
 
-The FreeAgent API exposes bank accounts and date/updated-time filters for bank transactions. See the official [bank accounts](https://dev.freeagent.com/docs/bank_accounts) and [bank transactions](https://dev.freeagent.com/docs/bank_transactions) documentation.
+The FreeAgent API exposes bank accounts and date/updated-time filters for bank transactions. All participating accounts in this Fido installation are GBP. See the official [bank accounts](https://dev.freeagent.com/docs/bank_accounts), [bank transactions](https://dev.freeagent.com/docs/bank_transactions), and [pagination and rate-limit](https://dev.freeagent.com/docs/introduction) documentation.
 
 ### Definition of done
 
@@ -254,9 +264,9 @@ Fido can repeatedly synchronise the selected accounts without duplicates or data
 
 ---
 
-## Stage 7 — Suggest transaction-to-receipt matches
+## Stage 7 — Suggest matches or choose out-of-pocket treatment
 
-**Goal:** rank likely matches transparently while keeping the user in control.
+**Goal:** rank likely matches transparently while keeping the user in control, including when no participating bank transaction should exist.
 
 ### Candidate generation
 
@@ -275,6 +285,10 @@ Start with deterministic rules before considering another model call:
 - Label results as high, medium, or low confidence using thresholds tuned on real examples.
 - Show the best candidates and explain why each one scored as it did.
 - Support **Confirm**, **Reject**, **Choose another transaction**, and **No matching transaction**.
+- Offer **Paid personally or cash — create out-of-pocket expense** as a distinct choice rather than treating every absent match as an error.
+- When out of pocket is selected, fetch FreeAgent spending categories and require the owner to choose one; OpenAI must not guess the accounting category.
+- Prepare a local, reviewable expense proposal containing claimant, category, date, original currency and gross amount, native GBP amount where applicable, description, VAT treatment, and attachment name.
+- Do not create the FreeAgent Expense during matching; Stage 8 retains the explicit final confirmation gate.
 - Learn owner-specific merchant aliases from confirmed matches without silently changing historical decisions.
 - Detect duplicate receipt uploads using a content hash plus extracted fields.
 - Never auto-confirm solely because there is one candidate.
@@ -291,15 +305,20 @@ On a representative labelled set, likely matches appear near the top with unders
 
 ---
 
-## Stage 8 — Confirm matches and send receipts to FreeAgent
+## Stage 8 — Confirm and send receipts or expenses to FreeAgent
 
-**Goal:** turn a reviewed match into a useful accounting record, safely and reversibly.
+**Goal:** turn a reviewed match or out-of-pocket choice into the intended accounting record, safely and reversibly.
 
 ### Scope
 
 - Store a match as a separate auditable record rather than embedding mutable match state in the receipt.
 - Record who confirmed it, when, the scoring inputs, and the FreeAgent identifiers involved.
 - In the FreeAgent sandbox, validate the correct workflow for attaching the receipt to an existing bank transaction/explanation.
+- For an out-of-pocket choice, show the exact Expense payload and create it only after a separate confirmation.
+- Use the authorised user's FreeAgent URL as claimant and the owner-selected FreeAgent category.
+- Send payments to the claimant as negative `gross_value`; for foreign receipts preserve the original currency and amount and use the owner-entered final GBP charge as negative `native_gross_value`.
+- Do not claim UK VAT on foreign-currency expenses. For GBP receipts, show and confirm the proposed VAT treatment rather than inferring an accounting decision silently.
+- Attach the processed receipt JPEG within FreeAgent's 5 MB attachment limit, retaining the immutable original in Fido.
 - Show the exact proposed write before sending anything to FreeAgent.
 - Require explicit confirmation for the first production writes.
 - Use idempotency/duplicate guards and reconcile the result by reading it back.
@@ -307,11 +326,11 @@ On a representative labelled set, likely matches appear near the top with unders
 - Support retry for network failures without creating duplicate explanations or attachments.
 - Define what **Unmatch** means locally and whether any remote change can or should be reversed.
 
-FreeAgent represents categorisation through bank transaction explanations, which can include attachments. Its capabilities and required fields vary by explanation type, so the final write flow should be proven in the sandbox against the official [bank transaction explanations documentation](https://dev.freeagent.com/docs/bank_transaction_explanations) before production use.
+FreeAgent represents categorisation through bank transaction explanations, which can include attachments. Out-of-pocket purchases are separate Expense resources and also support an attachment. Their capabilities and required fields vary, so both final write flows must be proven against the official [bank transaction explanations](https://dev.freeagent.com/docs/bank_transaction_explanations), [expenses](https://dev.freeagent.com/docs/expenses), and [attachments](https://dev.freeagent.com/docs/attachments) documentation before production use.
 
 ### Definition of done
 
-After explicit review, Fido can attach the intended receipt to the intended FreeAgent record exactly once, confirm the remote result, and retain a complete audit trail.
+After explicit review, Fido can either attach the intended receipt to the intended FreeAgent record or create one intended out-of-pocket Expense exactly once, confirm the remote result, and retain a complete audit trail.
 
 ---
 
@@ -344,10 +363,10 @@ Failures are visible and recoverable, costs are bounded and observable, sensitiv
 2. Add the trusted backend and authenticated inbound-email endpoint.
 3. Route emailed attachments into the receipt review queue.
 4. Add the OpenAI extraction review loop.
-5. Complete FreeAgent OAuth in the sandbox.
-6. Add read-only bank-account and transaction sync.
-7. Build and evaluate deterministic matching.
-8. Trial confirmed matches, then enable gated FreeAgent attachment writes.
+5. Complete and verify live FreeAgent OAuth.
+6. Import a bounded, read-only transaction window from explicitly selected GBP accounts.
+7. Tune deterministic matching on real examples and prepare owner-reviewed out-of-pocket proposals without writing accounting data.
+8. Trial confirmed matches and out-of-pocket expenses, then enable gated FreeAgent writes.
 9. Harden monitoring, recovery, privacy, and deletion before relying on Fido as the system of record.
 
 ## Guiding principles
