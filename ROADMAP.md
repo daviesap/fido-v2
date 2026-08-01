@@ -12,7 +12,7 @@ The roadmap is deliberately incremental. Each stage should leave the app usable,
 | 2 | Crop, rotate, and improve the receipt image | Complete |
 | 3 | Email receipts into Fido | Complete |
 | 4 | Extract structured receipt data with OpenAI | Complete |
-| 5 | Connect a live FreeAgent account securely | Planned |
+| 5 | Connect a live FreeAgent account securely | In progress |
 | 6 | Import and display FreeAgent bank transactions | Planned |
 | 7 | Suggest transaction-to-receipt matches | Planned |
 | 8 | Confirm matches and send receipts to FreeAgent | Planned |
@@ -193,10 +193,20 @@ For the test set, Fido reliably extracts merchant, a short purchase description,
 
 **Goal:** securely authorise Fido to read the owner's FreeAgent data.
 
+### Implemented in the Stage 5 branch
+
+- Production OAuth authorization-code flow through a fixed `fido.flair.london` callback.
+- Ten-minute, single-use OAuth state stored only as a SHA-256 document identifier.
+- Server-side token exchange and refresh with client credentials held in Firebase Secret Manager.
+- AES-256-GCM encryption of access and refresh tokens before they are written to Firestore.
+- Minimal identity verification through read-only `GET /v2/users/me` and `GET /v2/company` requests.
+- Connection status, health check, reconnect, and local token deletion controls in Fido.
+- A deliberate read-only boundary: Stages 5 and 6 issue no FreeAgent `POST`, `PUT`, or `DELETE` resource requests.
+
 ### Scope
 
 - Register a Fido application in the FreeAgent Developer Dashboard.
-- Build and test OAuth against the FreeAgent sandbox before enabling the production API.
+- Connect directly to the owner's production FreeAgent account, with a read-only application boundary until the later attachment stage.
 - Implement the server-side OAuth authorisation-code flow, including a short-lived, single-use `state` value and strict redirect URI validation.
 - Keep the client secret, access token, and refresh token server-side only.
 - Encrypt refresh tokens at rest and restrict access through the server's service identity.

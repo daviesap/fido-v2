@@ -4,6 +4,15 @@
     "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
     "cleanUrls": true,
     "trailingSlash": false,
+    "rewrites": [
+      {
+        "source": "/oauth/freeagent/callback",
+        "function": {
+          "functionId": "freeAgentOAuthCallback",
+          "region": "europe-west1"
+        }
+      }
+    ],
     "predeploy": ["npm run build"],
     "headers": [
       {
