@@ -11,7 +11,7 @@ The roadmap is deliberately incremental. Each stage should leave the app usable,
 | 1 | Upload and privately store a receipt | Complete |
 | 2 | Crop, rotate, and improve the receipt image | Complete |
 | 3 | Email receipts into Fido | Complete |
-| 4 | Extract structured receipt data with OpenAI | Next |
+| 4 | Extract structured receipt data with OpenAI | In progress |
 | 5 | Connect a live FreeAgent account securely | Planned |
 | 6 | Import and display FreeAgent bank transactions | Planned |
 | 7 | Suggest transaction-to-receipt matches | Planned |
@@ -140,26 +140,34 @@ An email from an authorised sender to the private receipt address creates each v
 
 Reuse the trusted server-side component introduced for email ingestion for OpenAI requests and later FreeAgent calls. OpenAI keys, OAuth secrets, and third-party tokens must never be shipped in `NEXT_PUBLIC_*` variables or called directly from the browser.
 
+Receipt capture remains fast: approving the processed image creates the receipt and returns control to the browser. A Firestore trigger queues a private Firebase Cloud Task, which performs extraction independently with bounded concurrency, retries, and visible failure states. OpenAI background mode is intentionally not used for this short task because Cloud Tasks already provides the required asynchronous boundary.
+
+### Implemented in the Stage 4 branch
+
+- Background states for queued, processing, ready to verify, failed, and verified receipts.
+- Private Cloud Task processing of the approved JPEG only, with the OpenAI key stored as a Firebase secret.
+- OpenAI Responses API image input with Structured Outputs, `store: false`, and a versioned prompt/schema.
+- Server validation of dates, ISO currencies, decimal-string totals, field confidence, and net/VAT reconciliation.
+- Review-queue filters, uncertainty highlighting, retry controls, and **Verify & next**.
+- Separation between immutable model extraction and owner-corrected verified values.
+
 ### Scope
 
 - Queue extraction after the image is approved, with retry and failure states.
 - Send the minimum required image data to an OpenAI vision-capable model.
 - Require schema-constrained structured output and validate it server-side.
 - Extract, where present:
-  - merchant name and address;
-  - receipt/invoice number;
-  - transaction date and time;
+  - merchant name;
+  - receipt date;
   - currency, including non-GBP receipts;
   - gross total;
   - net total and VAT amount when they are explicitly shown on a UK VAT receipt;
-  - VAT registration number when present;
-  - payment method and masked card digits;
 - Do not extract or store line-item detail; Fido only needs receipt-level totals for accounting and transaction matching.
+- Do not extract merchant addresses, receipt numbers, transaction times, VAT registration numbers, payment methods, card digits, or accounting categories; FreeAgent transaction matching does not require them.
 - Treat missing VAT as valid for non-UK receipts. Preserve the original currency and gross total, and do not infer UK VAT or flag its absence as an extraction error.
 - Store field-level confidence or warnings, model identifier, schema version, and prompt version.
 - Add a review form that highlights missing or uncertain fields and lets the user correct them.
-- Preserve the raw extraction response only when it is needed for debugging, with restricted access and a short retention period.
-- Track processing time and estimated API cost without logging receipt images or sensitive extracted text.
+- Do not preserve the raw extraction response. Store only the validated fields, model/prompt/schema versions, token usage, and processing duration.
 
 ### Quality and safety
 

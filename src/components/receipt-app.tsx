@@ -13,6 +13,7 @@ import {
   updateDoc,
   where,
 } from "firebase/firestore";
+import { httpsCallable } from "firebase/functions";
 import {
   deleteObject,
   getBlob,
@@ -22,20 +23,40 @@ import {
 } from "firebase/storage";
 import { useAuth } from "@/components/auth-provider";
 import { ReceiptReview } from "@/components/receipt-review";
-import { db, storage } from "@/lib/firebase";
+import { ReceiptVerification } from "@/components/receipt-verification";
+import { db, functions, storage } from "@/lib/firebase";
 import { PROCESSING_VERSION, type ProcessedReceiptImage } from "@/lib/image-processing";
 import {
   displayStoragePath,
   formatBytes,
+  hasProcessedAsset,
+  receiptQueue,
+  receiptStatusLabel,
   receiptContentType,
   safeFileName,
   validateReceiptFile,
+  type ReadyForVerificationExtraction,
   type Receipt,
+  type ReceiptQueue,
+  type VerifiedReceiptValues,
 } from "@/lib/receipt";
 
 type AppMessage = { text: string; error?: boolean };
 type EmailReviewReceipt = Extract<Receipt, { status: "needs_review" }>;
 type ReviewTarget = { file: File; receipt?: EmailReviewReceipt };
+type ReadyToVerifyReceipt = Extract<Receipt, { status: "ready_for_extraction" }> & {
+  extraction: ReadyForVerificationExtraction;
+};
+type ReceiptFilter = "all" | ReceiptQueue;
+
+const RECEIPT_FILTERS: { value: ReceiptFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "needs_review", label: "Needs review" },
+  { value: "extracting", label: "Extracting" },
+  { value: "ready_to_verify", label: "Ready to verify" },
+  { value: "verified", label: "Verified" },
+  { value: "problems", label: "Problems" },
+];
 
 export function ReceiptApp() {
   const { user, signOut } = useAuth();
@@ -46,10 +67,14 @@ export function ReceiptApp() {
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState<AppMessage | null>(null);
   const [selected, setSelected] = useState<Receipt | null>(null);
+  const [verificationTarget, setVerificationTarget] = useState<ReadyToVerifyReceipt | null>(null);
   const [reviewTarget, setReviewTarget] = useState<ReviewTarget | null>(null);
   const [openingReviewId, setOpeningReviewId] = useState<string | null>(null);
+  const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [filter, setFilter] = useState<ReceiptFilter>("all");
   const [emailCopied, setEmailCopied] = useState(false);
   const receiptEmailAddress = process.env.NEXT_PUBLIC_RECEIPT_EMAIL_ADDRESS ?? "receipts@flair.london";
+  const filteredReceipts = filter === "all" ? receipts : receipts.filter((receipt) => receiptQueue(receipt) === filter);
 
   useEffect(() => {
     if (!user) return;
@@ -155,8 +180,8 @@ export function ReceiptApp() {
       }
       setProgress(100);
       setMessage({ text: target.receipt
-        ? "Emailed receipt reviewed and ready for extraction."
-        : processed.qualityWarnings.length ? "Receipt stored with its quality notes." : "Receipt cropped and stored safely." });
+        ? "Emailed receipt reviewed. Extraction is queued in the background."
+        : processed.qualityWarnings.length ? "Receipt stored with its quality notes and queued for extraction." : "Receipt stored and queued for extraction." });
     } catch (error) {
       await Promise.all(uploadedObjects.map((objectRef) => deleteObject(objectRef).catch(() => undefined)));
       setMessage({ text: error instanceof Error ? error.message : "Upload failed.", error: true });
@@ -196,15 +221,51 @@ export function ReceiptApp() {
     setMessage(null);
     try {
       const paths = [receipt.storagePath];
-      if (receipt.status === "ready_for_extraction") paths.push(receipt.processedStoragePath);
+      if (hasProcessedAsset(receipt)) paths.push(receipt.processedStoragePath);
       await Promise.all(paths.map((path) => deleteObject(ref(storage, path)).catch((error: unknown) => {
         if ((error as { code?: string }).code !== "storage/object-not-found") throw error;
       })));
       await deleteDoc(doc(db, "receipts", receipt.id));
       if (selected?.id === receipt.id) setSelected(null);
+      if (verificationTarget?.id === receipt.id) setVerificationTarget(null);
       setMessage({ text: "Receipt and its derived image deleted." });
     } catch (error) {
       setMessage({ text: error instanceof Error ? error.message : "Delete failed.", error: true });
+    }
+  }
+
+  async function verifyReceipt(receipt: ReadyToVerifyReceipt, values: VerifiedReceiptValues) {
+    const next = receipts.find((candidate): candidate is ReadyToVerifyReceipt => candidate.id !== receipt.id && isReadyToVerify(candidate));
+    await updateDoc(doc(db, "receipts", receipt.id), {
+      status: "verified",
+      verifiedData: values,
+      verifiedAt: serverTimestamp(),
+    });
+    setVerificationTarget(next ?? null);
+    setMessage({ text: next ? "Receipt verified. Here’s the next one." : "Receipt verified and ready for matching." });
+  }
+
+  async function retryExtraction(receipt: Extract<Receipt, { status: "ready_for_extraction" }>) {
+    setRetryingId(receipt.id);
+    setMessage(null);
+    try {
+      const retry = httpsCallable<{ receiptId: string }, { queued: boolean }>(functions, "retryReceiptExtraction");
+      await retry({ receiptId: receipt.id });
+      setMessage({ text: receipt.extraction ? "Extraction queued again." : "Extraction queued." });
+    } catch (cause) {
+      setMessage({ text: cause instanceof Error ? cause.message : "Extraction could not be retried.", error: true });
+    } finally {
+      setRetryingId(null);
+    }
+  }
+
+  function openReceipt(receipt: Receipt) {
+    if (receipt.status === "needs_review") {
+      void reviewEmailedReceipt(receipt);
+    } else if (isReadyToVerify(receipt)) {
+      setVerificationTarget(receipt);
+    } else {
+      setSelected(receipt);
     }
   }
 
@@ -216,9 +277,9 @@ export function ReceiptApp() {
       </header>
       <main className="page">
         <section className="intro">
-          <p className="eyebrow">Stage three · capture anywhere</p>
-          <h1>A clear view of every receipt.</h1>
-          <p>Photograph, upload, or email a receipt, then crop, rotate, and check it before Fido stores both the untouched original and a clean processing copy.</p>
+          <p className="eyebrow">Stage four · quiet automation</p>
+          <h1>Receipts ready when you are.</h1>
+          <p>Photograph, upload, or email a receipt. Fido keeps capture quick, extracts the useful totals in the background, and leaves a short verification queue for later.</p>
         </section>
 
         <section className="email-receipt-card">
@@ -259,20 +320,40 @@ export function ReceiptApp() {
 
         <section className="library">
           <div className="library-heading">
-            <div><p className="eyebrow">Reviewed images</p><h2>Your receipts</h2></div>
+            <div><p className="eyebrow">Review queue</p><h2>Your receipts</h2></div>
             <span className="count">{receipts.length}</span>
+          </div>
+          <div className="receipt-filters" aria-label="Filter receipts">
+            {RECEIPT_FILTERS.map((item) => {
+              const count = item.value === "all" ? receipts.length : receipts.filter((receipt) => receiptQueue(receipt) === item.value).length;
+              return (
+                <button
+                  key={item.value}
+                  type="button"
+                  className={filter === item.value ? "active" : ""}
+                  onClick={() => setFilter(item.value)}
+                >
+                  {item.label}<span>{count}</span>
+                </button>
+              );
+            })}
           </div>
           {loading ? <div className="loading"><div className="spinner" /></div> : receipts.length === 0 ? (
             <div className="empty"><span>02</span><h3>No receipts yet</h3><p>Your first reviewed upload will appear here.</p></div>
+          ) : filteredReceipts.length === 0 ? (
+            <div className="empty"><span>—</span><h3>Nothing in this queue</h3><p>Choose another filter to see your receipts.</p></div>
           ) : (
             <div className="receipt-grid">
-              {receipts.map((receipt) => (
+              {filteredReceipts.map((receipt) => (
                 <ReceiptCard
                   key={receipt.id}
                   receipt={receipt}
                   opening={openingReviewId === receipt.id}
-                  onOpen={() => receipt.status === "needs_review" ? void reviewEmailedReceipt(receipt) : setSelected(receipt)}
+                  retrying={retryingId === receipt.id}
+                  onOpen={() => openReceipt(receipt)}
                   onReview={() => receipt.status === "needs_review" ? void reviewEmailedReceipt(receipt) : undefined}
+                  onVerify={() => isReadyToVerify(receipt) ? setVerificationTarget(receipt) : undefined}
+                  onRetry={() => receipt.status === "ready_for_extraction" ? void retryExtraction(receipt) : undefined}
                   onDelete={() => void remove(receipt)}
                 />
               ))}
@@ -282,6 +363,13 @@ export function ReceiptApp() {
       </main>
       {reviewTarget && (
         <ReceiptReview file={reviewTarget.file} onCancel={() => setReviewTarget(null)} onApprove={(result) => void uploadReviewedReceipt(result)} />
+      )}
+      {verificationTarget && (
+        <ReceiptVerification
+          receipt={verificationTarget}
+          onCancel={() => setVerificationTarget(null)}
+          onVerify={(values) => verifyReceipt(verificationTarget, values)}
+        />
       )}
       {selected && <ReceiptViewer receipt={selected} onClose={() => setSelected(null)} onDelete={() => void remove(selected)} />}
     </div>
@@ -342,19 +430,33 @@ function useReceiptImage(path: string | null) {
 function ReceiptCard({
   receipt,
   opening,
+  retrying,
   onOpen,
   onReview,
+  onVerify,
+  onRetry,
   onDelete,
 }: {
   receipt: Receipt;
   opening: boolean;
+  retrying: boolean;
   onOpen(): void;
   onReview(): void;
+  onVerify(): void;
+  onRetry(): void;
   onDelete(): void;
 }) {
   const needsReview = receipt.status === "needs_review";
+  const queue = receiptQueue(receipt);
   const { url, failed } = useReceiptImage(needsReview && receipt.contentType === "application/pdf" ? null : displayStoragePath(receipt));
   const date = (receipt.createdAt as { toDate?: () => Date } | null)?.toDate?.();
+  const extracted = receipt.status === "ready_for_extraction" && receipt.extraction?.state === "ready_for_verification"
+    ? receipt.extraction.result
+    : null;
+  const displayName = receipt.status === "verified" ? receipt.verifiedData.merchantName : extracted?.merchantName ?? receipt.originalFileName;
+  const total = receipt.status === "verified"
+    ? `${receipt.verifiedData.currency} ${receipt.verifiedData.grossTotal}`
+    : extracted?.currency && extracted.grossTotal ? `${extracted.currency} ${extracted.grossTotal}` : null;
   return (
     <article className="receipt-card">
       <button className="receipt-preview" onClick={onOpen} aria-label={`View ${receipt.originalFileName}`} disabled={opening}>
@@ -367,15 +469,21 @@ function ReceiptCard({
         ) : <span>{failed ? "Preview unavailable" : "Loading…"}</span>}
       </button>
       <div className="receipt-info">
-        <span className={`status-pill ${receipt.status === "ready_for_extraction" ? "ready" : needsReview ? "attention" : "legacy"}`}>
-          {receipt.status === "ready_for_extraction" ? "Reviewed" : needsReview ? "Needs review" : "Original only"}
+        <span className={`status-pill ${queue}`}>
+          {receiptStatusLabel(receipt)}
         </span>
-        <strong title={receipt.originalFileName}>{receipt.originalFileName}</strong>
+        <strong title={receipt.originalFileName}>{displayName}</strong>
+        {total && <small className="receipt-total">{total}</small>}
         {needsReview && <small className="email-origin">From {receipt.email.sender}</small>}
         <small>{date ? date.toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }) : "Just now"} · {formatBytes(receipt.size)}</small>
       </div>
       <div className="receipt-card-actions">
         {needsReview && <button className="review-button" onClick={onReview} disabled={opening}>{opening ? "Opening…" : "Review receipt"}</button>}
+        {queue === "ready_to_verify" && <button className="review-button" onClick={onVerify}>Verify values</button>}
+        {queue === "problems" && <button className="review-button" onClick={onRetry} disabled={retrying}>{retrying ? "Queuing…" : "Try again"}</button>}
+        {queue === "extracting" && receipt.status === "ready_for_extraction" && !receipt.extraction
+          ? <button className="review-button" onClick={onRetry} disabled={retrying}>{retrying ? "Queuing…" : "Start extraction"}</button>
+          : queue === "extracting" && <small className="background-note">You can leave this page</small>}
         <button className="delete-button" onClick={onDelete} aria-label={`Delete ${receipt.originalFileName}`}>Delete</button>
       </div>
     </article>
@@ -383,9 +491,9 @@ function ReceiptCard({
 }
 
 function ReceiptViewer({ receipt, onClose, onDelete }: { receipt: Receipt; onClose(): void; onDelete(): void }) {
-  const canShowProcessed = receipt.status === "ready_for_extraction";
+  const canShowProcessed = hasProcessedAsset(receipt);
   const [showOriginal, setShowOriginal] = useState(!canShowProcessed);
-  const showingProcessed = receipt.status === "ready_for_extraction" && !showOriginal;
+  const showingProcessed = hasProcessedAsset(receipt) && !showOriginal;
   const path = showingProcessed ? receipt.processedStoragePath : receipt.storagePath;
   const { url, failed } = useReceiptImage(path);
   const shownType = showingProcessed ? receipt.processedContentType : receipt.contentType;
@@ -424,4 +532,8 @@ function ReceiptViewer({ receipt, onClose, onDelete }: { receipt: Receipt; onClo
       </div>
     </div>
   );
+}
+
+function isReadyToVerify(receipt: Receipt): receipt is ReadyToVerifyReceipt {
+  return receipt.status === "ready_for_extraction" && receipt.extraction?.state === "ready_for_verification";
 }

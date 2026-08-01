@@ -1,10 +1,12 @@
-# Fido Receipt Manager — capture and image review
+# Fido Receipt Manager — capture, extraction, and review
 
-Fido lets one permitted Google account photograph, upload, or email a receipt image or PDF, select a PDF page when needed, review an automatically suggested crop, rotate it, check image-quality warnings, and privately store both the untouched original and a processed JPEG. Stored receipts can be browsed, compared with their originals, or deleted. It does not include OCR, OpenAI, or FreeAgent yet.
+Fido lets one permitted Google account photograph, upload, or email a receipt image or PDF, review its crop, and privately store both the untouched original and a processed JPEG. A background Firebase task then extracts merchant, date, currency, gross total, and explicit UK net/VAT totals with OpenAI. The owner can correct and verify those values later. FreeAgent integration is not included yet.
 
 Receipt attachments can also arrive through `receipts@flair.london`. The Gmail, Cloudflare Email Worker, and Firebase Function setup is documented in [docs/EMAIL_INGESTION.md](docs/EMAIL_INGESTION.md).
 
-The app remains a static Next.js PWA hosted on Firebase Hosting. Cropping, rotation, HEIC conversion, conservative image enhancement, and quality analysis happen in the browser. Firestore stores only file and reproducibility metadata; receipt images remain private in Storage and are read with the signed-in Firebase session. Security rules require both the correct UID and a private `fidoOwner` custom claim.
+Background extraction, Firebase secret setup, and production verification are documented in [docs/RECEIPT_EXTRACTION.md](docs/RECEIPT_EXTRACTION.md).
+
+The app remains a static Next.js PWA hosted on Firebase Hosting. Cropping, rotation, HEIC conversion, conservative image enhancement, and quality analysis happen in the browser. Firestore stores file metadata plus validated receipt-level totals; receipt images remain private in Storage and are read with the signed-in Firebase session. Security rules require both the correct UID and a private `fidoOwner` custom claim.
 
 ## Receipt workflow
 
@@ -12,7 +14,8 @@ The app remains a static Next.js PWA hosted on Firebase Hosting. Cropping, rotat
 2. For a multi-page PDF, choose the page containing the receipt.
 3. Adjust Fido's crop suggestion and rotate the image if necessary.
 4. Review the processed image and any blur, exposure, contrast, or resolution warnings.
-5. Save the receipt. The original is never modified; a bounded processed JPEG is stored beside it for the later extraction stage.
+5. Save the receipt. The browser is released while extraction runs in a private background task.
+6. Later, open **Ready to verify**, correct any uncertain values, and choose **Verify & next**.
 
 ## 1. Create the Firebase project
 
@@ -27,7 +30,7 @@ Camera/file uploads remain static and browser-side. Email ingestion adds one Fir
 
 ## 2. Configure locally
 
-Requires Node.js 20 or newer.
+Requires Node.js 22 or newer.
 
 ```bash
 npm install
@@ -86,4 +89,4 @@ Create a reCAPTCHA Enterprise site key, put it in `NEXT_PUBLIC_FIREBASE_APPCHECK
 - Processed image: `receipts/{ownerUid}/{receiptId}/processed-v1.jpg`
 - Firestore: `receipts/{receiptId}` with the owner and original metadata plus processed path/size, selected PDF page where applicable, crop percentages, rotation, source/output dimensions, processing version, quality warnings, and timestamps
 
-Older Stage 1 documents with `status: "stored"` remain readable. New reviewed documents use `status: "ready_for_extraction"`, providing a clean trigger point for the future server-side extraction stage.
+Older Stage 1 documents with `status: "stored"` remain readable. Reviewed documents use `status: "ready_for_extraction"` while their nested extraction state moves through the background queue. Owner-approved values are stored separately under `verifiedData` with `status: "verified"`; model output never overwrites those corrections.

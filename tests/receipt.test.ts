@@ -4,9 +4,12 @@ import {
   displayStoragePath,
   formatBytes,
   ReceiptSchema,
+  receiptQueue,
+  receiptStatusLabel,
   receiptContentType,
   safeFileName,
   validateReceiptFile,
+  VerifiedReceiptValuesSchema,
 } from "@/lib/receipt";
 
 describe("receipt file validation", () => {
@@ -106,5 +109,60 @@ describe("receipt display helpers", () => {
     });
 
     expect(displayStoragePath({ id: "id", ...parsed })).toBe("receipts/owner/id/original-receipt.pdf");
+  });
+
+  it("shows newly reviewed receipts as extracting", () => {
+    const parsed = ReceiptSchema.parse({
+      ownerUid: "owner",
+      status: "ready_for_extraction",
+      storagePath: "receipts/owner/id/original.jpg",
+      originalFileName: "receipt.jpg",
+      contentType: "image/jpeg",
+      size: 2000,
+      createdAt: null,
+      processedStoragePath: "receipts/owner/id/processed-v1.jpg",
+      processedContentType: "image/jpeg",
+      processedSize: 1500,
+      processing: {
+        version: 1,
+        rotation: 0,
+        crop: { x: 0, y: 0, width: 100, height: 100 },
+        sourceWidth: 1800,
+        sourceHeight: 2400,
+        outputWidth: 1800,
+        outputHeight: 2400,
+        qualityWarnings: [],
+        processedAt: null,
+      },
+      extraction: { state: "queued", generation: 1, attemptCount: 0, queuedAt: null },
+    });
+
+    expect(receiptQueue({ id: "id", ...parsed })).toBe("extracting");
+    expect(receiptStatusLabel({ id: "id", ...parsed })).toBe("Extracting");
+  });
+
+  it("accepts verified foreign totals without VAT", () => {
+    expect(VerifiedReceiptValuesSchema.parse({
+      merchantName: "Café de la Gare",
+      receiptDate: "2026-07-30",
+      currency: "EUR",
+      grossTotal: "18.40",
+      netTotal: null,
+      vatTotal: null,
+    })).toBeTruthy();
+  });
+
+  it("rejects invalid dates, currencies, and numeric money values", () => {
+    const values = {
+      merchantName: "Shop",
+      receiptDate: "2026-02-28",
+      currency: "GBP",
+      grossTotal: "10.00",
+      netTotal: null,
+      vatTotal: null,
+    };
+    expect(() => VerifiedReceiptValuesSchema.parse({ ...values, receiptDate: "2026-02-30" })).toThrow();
+    expect(() => VerifiedReceiptValuesSchema.parse({ ...values, currency: "GB" })).toThrow();
+    expect(() => VerifiedReceiptValuesSchema.parse({ ...values, grossTotal: 10 })).toThrow();
   });
 });

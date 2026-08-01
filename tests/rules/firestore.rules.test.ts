@@ -70,6 +70,46 @@ const emailReviewFields = {
   reviewedAt: serverTimestamp(),
 };
 
+const readyExtraction = {
+  state: "ready_for_verification",
+  generation: 1,
+  attemptCount: 1,
+  queuedAt: serverTimestamp(),
+  startedAt: serverTimestamp(),
+  completedAt: serverTimestamp(),
+  durationMs: 850,
+  schemaVersion: 1,
+  promptVersion: 1,
+  model: "gpt-5.6-luna",
+  usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+  result: {
+    merchantName: "Corner Shop",
+    receiptDate: "2026-07-31",
+    currency: "GBP",
+    grossTotal: "12.00",
+    netTotal: "10.00",
+    vatTotal: "2.00",
+    confidence: {
+      merchantName: "high",
+      receiptDate: "high",
+      currency: "high",
+      grossTotal: "high",
+      netTotal: "high",
+      vatTotal: "high",
+    },
+    warnings: [],
+  },
+};
+
+const verifiedData = {
+  merchantName: "Corner Shop",
+  receiptDate: "2026-07-31",
+  currency: "GBP",
+  grossTotal: "12.00",
+  netTotal: "10.00",
+  vatTotal: "2.00",
+};
+
 describe("Firestore receipt rules", () => {
   beforeAll(async () => {
     testEnv = await initializeTestEnvironment({
@@ -165,6 +205,46 @@ describe("Firestore receipt rules", () => {
 
     await assertFails(updateDoc(receiptRef, { ...emailReviewFields, originalFileName: "changed.pdf" }));
     await assertFails(updateDoc(receiptRef, { ...emailReviewFields, email: { ...emailedReceipt.email, sender: "other@example.com" } }));
+  });
+
+  it("lets the owner verify extracted receipt values without changing the server extraction", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "receipts/receipt-1"), {
+        ...reviewedReceipt,
+        extraction: readyExtraction,
+      });
+    });
+    const db = testEnv.authenticatedContext(ownerUid, { fidoOwner: true }).firestore();
+    const receiptRef = doc(db, "receipts/receipt-1");
+
+    await assertSucceeds(updateDoc(receiptRef, {
+      status: "verified",
+      verifiedData,
+      verifiedAt: serverTimestamp(),
+    }));
+  });
+
+  it("rejects invalid verification values and client changes to extraction state", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "receipts/receipt-1"), {
+        ...reviewedReceipt,
+        extraction: readyExtraction,
+      });
+    });
+    const db = testEnv.authenticatedContext(ownerUid, { fidoOwner: true }).firestore();
+    const receiptRef = doc(db, "receipts/receipt-1");
+
+    await assertFails(updateDoc(receiptRef, {
+      status: "verified",
+      verifiedData: { ...verifiedData, currency: "£" },
+      verifiedAt: serverTimestamp(),
+    }));
+    await assertFails(updateDoc(receiptRef, {
+      status: "verified",
+      verifiedData,
+      verifiedAt: serverTimestamp(),
+      extraction: { ...readyExtraction, model: "changed-in-browser" },
+    }));
   });
 
   it("denies another user and a user without the owner claim", async () => {

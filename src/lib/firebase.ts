@@ -2,6 +2,7 @@ import { getApp, getApps, initializeApp } from "firebase/app";
 import { ReCaptchaEnterpriseProvider, initializeAppCheck } from "firebase/app-check";
 import { connectAuthEmulator, getAuth } from "firebase/auth";
 import { connectFirestoreEmulator, getFirestore } from "firebase/firestore";
+import { connectFunctionsEmulator, getFunctions } from "firebase/functions";
 import { connectStorageEmulator, getStorage } from "firebase/storage";
 
 const firebaseConfig = {
@@ -16,12 +17,14 @@ export const firebaseApp = getApps().length ? getApp() : initializeApp(firebaseC
 export const auth = getAuth(firebaseApp);
 export const db = getFirestore(firebaseApp);
 export const storage = getStorage(firebaseApp);
+export const functions = getFunctions(firebaseApp, "europe-west1");
 
 let emulatorsConnected = false;
 if (typeof window !== "undefined" && process.env.NEXT_PUBLIC_USE_FIREBASE_EMULATORS === "true" && !emulatorsConnected) {
   connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
   connectFirestoreEmulator(db, "127.0.0.1", 8080);
   connectStorageEmulator(storage, "127.0.0.1", 9899);
+  connectFunctionsEmulator(functions, "127.0.0.1", 5001);
   emulatorsConnected = true;
 }
 

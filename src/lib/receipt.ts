@@ -19,6 +19,17 @@ const ReceiptBaseSchema = z.object({
   createdAt: z.unknown(),
 });
 
+const EmailFieldsSchema = z.object({
+  source: z.literal("email"),
+  contentHash: z.string().length(64),
+  email: z.object({
+    sender: z.string().email(),
+    subject: z.string().min(1).max(200),
+    messageId: z.string().max(500),
+    receivedAt: z.unknown(),
+  }),
+});
+
 export const QualityWarningSchema = z.enum([
   "low-resolution",
   "blurry",
@@ -28,59 +39,165 @@ export const QualityWarningSchema = z.enum([
   "possible-glare",
 ]);
 
+const MoneySchema = z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/);
+const CurrencySchema = z.string().regex(/^[A-Z]{3}$/);
+const DateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(isCalendarDate);
+const ConfidenceSchema = z.enum(["high", "medium", "low", "not_present"]);
+const EXTRACTION_FIELDS = ["merchantName", "receiptDate", "currency", "grossTotal", "netTotal", "vatTotal"] as const;
+
+export const ReceiptExtractionResultSchema = z.object({
+  merchantName: z.string().trim().min(1).max(160).nullable(),
+  receiptDate: DateSchema.nullable(),
+  currency: CurrencySchema.nullable(),
+  grossTotal: MoneySchema.nullable(),
+  netTotal: MoneySchema.nullable(),
+  vatTotal: MoneySchema.nullable(),
+  confidence: z.object({
+    merchantName: ConfidenceSchema,
+    receiptDate: ConfidenceSchema,
+    currency: ConfidenceSchema,
+    grossTotal: ConfidenceSchema,
+    netTotal: ConfidenceSchema,
+    vatTotal: ConfidenceSchema,
+  }),
+  warnings: z.array(z.string().min(1).max(160)).max(8),
+}).superRefine((value, context) => {
+  for (const field of EXTRACTION_FIELDS) {
+    const absent = value[field] === null;
+    if (absent !== (value.confidence[field] === "not_present")) {
+      context.addIssue({ code: "custom", path: ["confidence", field], message: "Confidence must match field presence." });
+    }
+  }
+});
+
+export const VerifiedReceiptValuesSchema = z.object({
+  merchantName: z.string().trim().min(1, "Enter the merchant name.").max(160),
+  receiptDate: DateSchema,
+  currency: CurrencySchema,
+  grossTotal: MoneySchema.refine((value) => moneyToMinorUnits(value) > 0n, "Enter a total greater than zero."),
+  netTotal: MoneySchema.nullable(),
+  vatTotal: MoneySchema.nullable(),
+});
+
+const ExtractionBaseSchema = z.object({
+  generation: z.number().int().positive(),
+  attemptCount: z.number().int().nonnegative(),
+  queuedAt: z.unknown(),
+});
+
+export const ReadyForVerificationExtractionSchema = ExtractionBaseSchema.extend({
+  state: z.literal("ready_for_verification"),
+  startedAt: z.unknown(),
+  completedAt: z.unknown(),
+  durationMs: z.number().int().nonnegative(),
+  schemaVersion: z.literal(1),
+  promptVersion: z.literal(1),
+  model: z.string().min(1),
+  usage: z.object({
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+    totalTokens: z.number().int().nonnegative(),
+  }),
+  result: ReceiptExtractionResultSchema,
+});
+
+export const ReceiptExtractionSchema = z.discriminatedUnion("state", [
+  ExtractionBaseSchema.extend({
+    state: z.literal("queued"),
+    lastErrorCode: z.string().max(80).optional(),
+  }),
+  ExtractionBaseSchema.extend({
+    state: z.literal("processing"),
+    startedAt: z.unknown(),
+  }),
+  ReadyForVerificationExtractionSchema,
+  z.object({
+    state: z.literal("failed"),
+    generation: z.number().int().positive(),
+    attemptCount: z.number().int().nonnegative(),
+    errorCode: z.string().min(1).max(80),
+    failedAt: z.unknown(),
+    queuedAt: z.unknown().optional(),
+  }),
+]);
+
+const ProcessingFieldsSchema = z.object({
+  processedStoragePath: z.string().min(1),
+  processedContentType: z.literal("image/jpeg"),
+  processedSize: z.number().int().positive().max(MAX_RECEIPT_BYTES),
+  processing: z.object({
+    version: z.literal(1),
+    rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]),
+    crop: z.object({
+      x: z.number().min(0).max(100),
+      y: z.number().min(0).max(100),
+      width: z.number().positive().max(100),
+      height: z.number().positive().max(100),
+    }),
+    sourceWidth: z.number().int().positive(),
+    sourceHeight: z.number().int().positive(),
+    outputWidth: z.number().int().positive(),
+    outputHeight: z.number().int().positive(),
+    sourcePage: z.number().int().positive().nullable().optional(),
+    qualityWarnings: z.array(QualityWarningSchema).max(6),
+    processedAt: z.unknown(),
+  }),
+  source: z.literal("email").optional(),
+  contentHash: z.string().length(64).optional(),
+  email: EmailFieldsSchema.shape.email.optional(),
+  reviewedAt: z.unknown().optional(),
+});
+
+const ProcessedReceiptSchema = ReceiptBaseSchema.merge(ProcessingFieldsSchema);
+
 export const ReceiptSchema = z.discriminatedUnion("status", [
-  ReceiptBaseSchema.extend({
-    status: z.literal("stored"),
-  }),
-  ReceiptBaseSchema.extend({
-    status: z.literal("needs_review"),
-    source: z.literal("email"),
-    contentHash: z.string().length(64),
-    email: z.object({
-      sender: z.string().email(),
-      subject: z.string().min(1).max(200),
-      messageId: z.string().max(500),
-      receivedAt: z.unknown(),
-    }),
-  }),
-  ReceiptBaseSchema.extend({
+  ReceiptBaseSchema.extend({ status: z.literal("stored") }),
+  ReceiptBaseSchema.merge(EmailFieldsSchema).extend({ status: z.literal("needs_review") }),
+  ProcessedReceiptSchema.extend({
     status: z.literal("ready_for_extraction"),
-    source: z.literal("email").optional(),
-    contentHash: z.string().length(64).optional(),
-    email: z.object({
-      sender: z.string().email(),
-      subject: z.string().min(1).max(200),
-      messageId: z.string().max(500),
-      receivedAt: z.unknown(),
-    }).optional(),
-    reviewedAt: z.unknown().optional(),
-    processedStoragePath: z.string().min(1),
-    processedContentType: z.literal("image/jpeg"),
-    processedSize: z.number().int().positive().max(MAX_RECEIPT_BYTES),
-    processing: z.object({
-      version: z.literal(1),
-      rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]),
-      crop: z.object({
-        x: z.number().min(0).max(100),
-        y: z.number().min(0).max(100),
-        width: z.number().positive().max(100),
-        height: z.number().positive().max(100),
-      }),
-      sourceWidth: z.number().int().positive(),
-      sourceHeight: z.number().int().positive(),
-      outputWidth: z.number().int().positive(),
-      outputHeight: z.number().int().positive(),
-      sourcePage: z.number().int().positive().nullable().optional(),
-      qualityWarnings: z.array(QualityWarningSchema).max(6),
-      processedAt: z.unknown(),
-    }),
+    extraction: ReceiptExtractionSchema.optional(),
+  }),
+  ProcessedReceiptSchema.extend({
+    status: z.literal("verified"),
+    extraction: ReadyForVerificationExtractionSchema,
+    verifiedData: VerifiedReceiptValuesSchema,
+    verifiedAt: z.unknown(),
   }),
 ]);
 
 export type Receipt = z.infer<typeof ReceiptSchema> & { id: string };
+export type VerifiedReceiptValues = z.infer<typeof VerifiedReceiptValuesSchema>;
+export type ReadyForVerificationExtraction = z.infer<typeof ReadyForVerificationExtractionSchema>;
+export type ReceiptQueue = "needs_review" | "extracting" | "ready_to_verify" | "verified" | "problems" | "original";
 
 export function displayStoragePath(receipt: Receipt): string {
-  return receipt.status === "ready_for_extraction" ? receipt.processedStoragePath : receipt.storagePath;
+  return hasProcessedAsset(receipt) ? receipt.processedStoragePath : receipt.storagePath;
+}
+
+export function hasProcessedAsset(receipt: Receipt): receipt is Extract<Receipt, { status: "ready_for_extraction" | "verified" }> {
+  return receipt.status === "ready_for_extraction" || receipt.status === "verified";
+}
+
+export function receiptQueue(receipt: Receipt): ReceiptQueue {
+  if (receipt.status === "needs_review") return "needs_review";
+  if (receipt.status === "verified") return "verified";
+  if (receipt.status === "stored") return "original";
+  if (!receipt.extraction || receipt.extraction.state === "queued" || receipt.extraction.state === "processing") return "extracting";
+  if (receipt.extraction.state === "ready_for_verification") return "ready_to_verify";
+  return "problems";
+}
+
+export function receiptStatusLabel(receipt: Receipt): string {
+  if (receipt.status === "ready_for_extraction" && !receipt.extraction) return "Ready to extract";
+  const queue = receiptQueue(receipt);
+  return {
+    needs_review: "Needs image review",
+    extracting: "Extracting",
+    ready_to_verify: "Ready to verify",
+    verified: "Verified",
+    problems: "Problem",
+    original: "Original only",
+  }[queue];
 }
 
 export function receiptContentType(file: Pick<File, "type" | "name">): string | null {
@@ -112,4 +229,14 @@ export function formatBytes(size: number): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${Math.round((size / 1024) * 10) / 10} KB`;
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function isCalendarDate(value: string): boolean {
+  const date = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+function moneyToMinorUnits(value: string): bigint {
+  const [whole, fraction = ""] = value.split(".");
+  return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
 }
