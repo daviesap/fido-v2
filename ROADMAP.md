@@ -148,7 +148,9 @@ Receipt capture remains fast: approving the processed image creates the receipt 
 - Private Cloud Task processing of the approved JPEG only, with the OpenAI key stored as a Firebase secret.
 - OpenAI Responses API image input with Structured Outputs, `store: false`, and a versioned prompt/schema.
 - Server validation of dates, ISO currencies, decimal-string totals, field confidence, and net/VAT reconciliation.
+- Deterministic removal of net and VAT output for non-GBP receipts, even if the model returns it.
 - Review-queue filters, uncertainty highlighting, retry controls, and **Verify & next**.
+- A mobile verification sheet that scrolls independently and keeps its actions reachable.
 - Separation between immutable model extraction and owner-corrected verified values.
 
 ### Scope

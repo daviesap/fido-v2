@@ -25,7 +25,7 @@ Fido stores only:
 - field confidence and short warnings;
 - model, schema and prompt versions, token usage, and processing duration.
 
-Money is stored as a decimal string, never a floating-point value. Foreign receipts keep their original currency and normally have `null` net/VAT values. Line items and unnecessary identifiers are neither requested nor retained.
+Money is stored as a decimal string, never a floating-point value. Non-GBP receipts keep their original currency and always have `null` net/VAT values, enforced after model validation. Line items and unnecessary identifiers are neither requested nor retained.
 
 ## OpenAI configuration
 
