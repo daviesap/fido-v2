@@ -1,3 +1,4 @@
+import { Parser } from "htmlparser2";
 import { PDFDocument, PDFFont, PDFPage, StandardFonts, rgb } from "pdf-lib";
 
 import {
@@ -57,17 +58,34 @@ export function emailBodyText(text?: string, html?: string): string {
 }
 
 export function htmlToPlainText(html: string): string {
-  const text = decodeHtmlEntities(html
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/<(script|style|head|noscript|svg|canvas|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<li\b[^>]*>/gi, "\n- ")
-    .replace(/<\/(?:p|div|section|article|header|footer|table|tr|ul|ol|li|h[1-6]|blockquote|pre)\s*>/gi, "\n")
-    .replace(/<\/(?:td|th)\s*>/gi, "\t")
-    .replace(/<[^>]+>/g, ""));
-  // Entity decoding and malformed markup can reintroduce tag openers after
-  // stripping. PDF text never needs angle brackets, so remove them at the
-  // final trust boundary as defence in depth.
+  const suppressedTags = new Set(["script", "style", "head", "noscript", "svg", "canvas", "template"]);
+  const blockTags = new Set(["p", "div", "section", "article", "header", "footer", "table", "tr", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre"]);
+  let suppressedDepth = 0;
+  let text = "";
+  const parser = new Parser({
+    onopentag(name) {
+      if (suppressedTags.has(name)) {
+        suppressedDepth += 1;
+      } else if (!suppressedDepth && name === "br") {
+        text += "\n";
+      } else if (!suppressedDepth && name === "li") {
+        text += "\n- ";
+      }
+    },
+    ontext(value) {
+      if (!suppressedDepth) text += value;
+    },
+    onclosetag(name) {
+      if (suppressedTags.has(name)) {
+        suppressedDepth = Math.max(0, suppressedDepth - 1);
+      } else if (!suppressedDepth && blockTags.has(name)) {
+        text += "\n";
+      } else if (!suppressedDepth && (name === "td" || name === "th")) {
+        text += "\t";
+      }
+    },
+  }, { decodeEntities: true, lowerCaseTags: true });
+  parser.end(html);
   return text.replace(/[<>]/g, "");
 }
 
@@ -213,40 +231,4 @@ function normaliseText(value: string): string {
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-}
-
-function decodeHtmlEntities(value: string): string {
-  const named: Record<string, string> = {
-    amp: "&",
-    apos: "'",
-    gt: ">",
-    hellip: "…",
-    laquo: "«",
-    ldquo: "“",
-    lsquo: "‘",
-    lt: "<",
-    mdash: "—",
-    middot: "·",
-    nbsp: " ",
-    ndash: "–",
-    pound: "£",
-    quot: "\"",
-    raquo: "»",
-    rdquo: "”",
-    reg: "®",
-    rsquo: "’",
-    times: "×",
-    trade: "™",
-    euro: "€",
-  };
-  return value.replace(/&(#(?:x[0-9a-f]+|\d+)|[a-z][a-z0-9]+);/gi, (entity, token: string) => {
-    if (token.startsWith("#")) {
-      const hexadecimal = token[1]?.toLowerCase() === "x";
-      const codePoint = Number.parseInt(token.slice(hexadecimal ? 2 : 1), hexadecimal ? 16 : 10);
-      return Number.isSafeInteger(codePoint) && codePoint > 0 && codePoint <= 0x10ffff
-        ? String.fromCodePoint(codePoint)
-        : entity;
-    }
-    return named[token.toLowerCase()] ?? entity;
-  });
 }
