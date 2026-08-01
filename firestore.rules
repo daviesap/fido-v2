@@ -88,6 +88,35 @@ service cloud.firestore {
         ]);
     }
 
+    function isEmailReviewUpdate(receiptId) {
+      return resource.data.status == 'needs_review'
+        && resource.data.source == 'email'
+        && request.resource.data.status == 'ready_for_extraction'
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.storagePath == resource.data.storagePath
+        && request.resource.data.originalFileName == resource.data.originalFileName
+        && request.resource.data.contentType == resource.data.contentType
+        && request.resource.data.size == resource.data.size
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.source == resource.data.source
+        && request.resource.data.contentHash == resource.data.contentHash
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.processedStoragePath ==
+          'receipts/' + request.auth.uid + '/' + receiptId + '/processed-v1.jpg'
+        && request.resource.data.processedContentType == 'image/jpeg'
+        && request.resource.data.processedSize is int
+        && request.resource.data.processedSize > 0
+        && request.resource.data.processedSize < 20 * 1024 * 1024
+        && isValidProcessing(request.resource.data.processing)
+        && request.resource.data.reviewedAt == request.time
+        && request.resource.data.keys().hasOnly([
+          'ownerUid', 'status', 'source', 'storagePath', 'originalFileName',
+          'contentType', 'size', 'contentHash', 'email', 'createdAt',
+          'processedStoragePath', 'processedContentType', 'processedSize',
+          'processing', 'reviewedAt'
+        ]);
+    }
+
     match /receipts/{receiptId} {
       allow read: if isOwner() && resource.data.ownerUid == request.auth.uid;
 
@@ -95,7 +124,9 @@ service cloud.firestore {
         && (isStoredOriginal(receiptId) || isReviewedReceipt(receiptId));
 
       allow delete: if isOwner() && resource.data.ownerUid == request.auth.uid;
-      allow update: if false;
+      allow update: if isOwner()
+        && resource.data.ownerUid == request.auth.uid
+        && isEmailReviewUpdate(receiptId);
     }
 
     match /{document=**} {

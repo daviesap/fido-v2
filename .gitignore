@@ -1,4 +1,6 @@
 node_modules/
+functions/lib/
+email-worker/.wrangler/
 .next/
 out/
 .firebase/
@@ -9,6 +11,8 @@ ui-debug.log
 .env
 .env.local
 .env.*.local
+functions/.env*
+email-worker/.dev.vars*
 !.env.example
 *.tsbuildinfo
 .DS_Store

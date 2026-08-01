@@ -10,8 +10,8 @@ The roadmap is deliberately incremental. Each stage should leave the app usable,
 | --- | --- | --- |
 | 1 | Upload and privately store a receipt | Complete |
 | 2 | Crop, rotate, and improve the receipt image | Complete |
-| 3 | Email receipts into Fido | Next |
-| 4 | Extract structured receipt data with OpenAI | Planned |
+| 3 | Email receipts into Fido | Complete |
+| 4 | Extract structured receipt data with OpenAI | Next |
 | 5 | Connect a live FreeAgent account securely | Planned |
 | 6 | Import and display FreeAgent bank transactions | Planned |
 | 7 | Suggest transaction-to-receipt matches | Planned |
@@ -82,7 +82,28 @@ The user can approve a legible, correctly oriented receipt image, and both the u
 
 ### Architecture first
 
-Inbound email requires a trusted server-side component and an email receiving service that can deliver signed webhooks or events. The receiving endpoint should run in a Firebase Cloud Function or Cloud Run service. It must authenticate the email provider before accepting content; the static browser application must not hold inbound-email credentials.
+`receipts@flair.london` remains hosted by Google Mail. A Gmail attachment filter forwards to a private address on the isolated `ingest.flair.london` subdomain, where a Cloudflare Email Worker parses attachments and sends an HMAC-signed payload to a Firebase HTTPS Function. This keeps the existing Google Mail MX records untouched and keeps the private forwarding address and shared secret out of the browser.
+
+### Implemented
+
+- Cloudflare Email Worker with MIME parsing, inline-image filtering, attachment/count/size limits, and exact-recipient checks.
+- HMAC-SHA256 payload signing with a timestamp and nonce.
+- Firebase HTTPS Function with signature verification, strict payload parsing, byte-level file detection, rate limiting, deterministic deduplication, and private original storage.
+- `needs_review` receipt state with immutable email provenance and owner-only review transition rules.
+- In-app email instructions, queue badges, PDF/image review, and removal.
+- Separate Firebase and Cloudflare secret configuration with no committed credentials.
+- Setup and end-to-end test instructions in `docs/EMAIL_INGESTION.md`.
+- Production deployment using Gmail, Cloudflare Email Routing on the isolated `ingest.flair.london` subdomain, a Cloudflare Email Worker, and a Firebase HTTPS Function.
+- End-to-end production verification: a PDF sent to `receipts@flair.london` was ingested exactly once, stored privately, shown as **Needs review**, and successfully opened in the review flow.
+
+### Operational follow-ups
+
+These are useful hardening improvements rather than blockers for the working single-owner flow, and can be completed as part of Stage 9:
+
+- Add an in-app delivery activity/failure view and a retry or dead-letter recovery path.
+- Add optional sender allowlist management and private-address rotation controls.
+- Add abuse alerts and a minimal acknowledgement or rejection email.
+- Test multiple attachments and common image formats against production routing in addition to the verified PDF path.
 
 ### Scope
 
@@ -128,11 +149,13 @@ Reuse the trusted server-side component introduced for email ingestion for OpenA
   - merchant name and address;
   - receipt/invoice number;
   - transaction date and time;
-  - currency;
-  - subtotal, tax/VAT, tip, and total;
-  - VAT registration number and tax-rate breakdown;
+  - currency, including non-GBP receipts;
+  - gross total;
+  - net total and VAT amount when they are explicitly shown on a UK VAT receipt;
+  - VAT registration number when present;
   - payment method and masked card digits;
-  - line items (useful, but not required for matching).
+- Do not extract or store line-item detail; Fido only needs receipt-level totals for accounting and transaction matching.
+- Treat missing VAT as valid for non-UK receipts. Preserve the original currency and gross total, and do not infer UK VAT or flag its absence as an extraction error.
 - Store field-level confidence or warnings, model identifier, schema version, and prompt version.
 - Add a review form that highlights missing or uncertain fields and lets the user correct them.
 - Preserve the raw extraction response only when it is needed for debugging, with restricted access and a short retention period.
@@ -140,15 +163,15 @@ Reuse the trusted server-side component introduced for email ingestion for OpenA
 
 ### Quality and safety
 
-- Validate that subtotal, tax, tip, and total are arithmetically plausible.
+- When net and VAT are both present, validate that they plausibly add up to the gross total. Do not invent a net amount or VAT amount when the receipt does not state one.
 - Parse money as decimal strings or integer minor units, never floating-point values.
 - Treat model output as untrusted input and validate dates, currency codes, and field lengths.
-- Build an anonymised test set covering crumpled, long, faded, handwritten, foreign-currency, and multi-rate VAT receipts.
+- Build an anonymised test set covering crumpled, long, faded, handwritten, UK VAT, and foreign-currency receipts with no VAT.
 - Make extraction repeatable from a chosen schema/prompt version without overwriting user corrections.
 
 ### Definition of done
 
-For the test set, Fido reliably extracts merchant, date, currency, and total, clearly marks uncertainty, and lets the user approve or correct every value.
+For the test set, Fido reliably extracts merchant, date, currency, and gross total; captures net and VAT only when applicable; clearly marks uncertainty; and lets the user approve or correct every value.
 
 ---
 

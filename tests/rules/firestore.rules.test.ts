@@ -43,6 +43,33 @@ const reviewedReceipt = {
   },
 };
 
+const emailedReceipt = {
+  ownerUid,
+  status: "needs_review",
+  source: "email",
+  storagePath: `receipts/${ownerUid}/receipt-1/original-receipt.pdf`,
+  originalFileName: "receipt.pdf",
+  contentType: "application/pdf",
+  size: 1234,
+  contentHash: "a".repeat(64),
+  email: {
+    sender: "sender@example.com",
+    subject: "Your receipt",
+    messageId: "<message@example.com>",
+    receivedAt: serverTimestamp(),
+  },
+  createdAt: serverTimestamp(),
+};
+
+const emailReviewFields = {
+  status: "ready_for_extraction",
+  processedStoragePath: `receipts/${ownerUid}/receipt-1/processed-v1.jpg`,
+  processedContentType: "image/jpeg",
+  processedSize: 1000,
+  processing: reviewedReceipt.processing,
+  reviewedAt: serverTimestamp(),
+};
+
 describe("Firestore receipt rules", () => {
   beforeAll(async () => {
     testEnv = await initializeTestEnvironment({
@@ -116,6 +143,28 @@ describe("Firestore receipt rules", () => {
       ...reviewedReceipt,
       processing: { ...reviewedReceipt.processing, sourcePage: 0 },
     }));
+  });
+
+  it("lets the owner review an emailed receipt without changing its provenance", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "receipts/receipt-1"), emailedReceipt);
+    });
+    const db = testEnv.authenticatedContext(ownerUid, { fidoOwner: true }).firestore();
+    const receiptRef = doc(db, "receipts/receipt-1");
+
+    await assertSucceeds(updateDoc(receiptRef, emailReviewFields));
+    await assertSucceeds(getDoc(receiptRef));
+  });
+
+  it("rejects review updates that change an emailed receipt's original or provenance", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "receipts/receipt-1"), emailedReceipt);
+    });
+    const db = testEnv.authenticatedContext(ownerUid, { fidoOwner: true }).firestore();
+    const receiptRef = doc(db, "receipts/receipt-1");
+
+    await assertFails(updateDoc(receiptRef, { ...emailReviewFields, originalFileName: "changed.pdf" }));
+    await assertFails(updateDoc(receiptRef, { ...emailReviewFields, email: { ...emailedReceipt.email, sender: "other@example.com" } }));
   });
 
   it("denies another user and a user without the owner claim", async () => {

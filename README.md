@@ -1,6 +1,8 @@
 # Fido Receipt Manager — capture and image review
 
-Fido lets one permitted Google account photograph or choose a receipt image or PDF, select a PDF page when needed, review an automatically suggested crop, rotate it, check image-quality warnings, and privately store both the untouched original and a processed JPEG. Stored receipts can be browsed, compared with their originals, or deleted. It does not include OCR, OpenAI, Cloud Functions, or FreeAgent yet.
+Fido lets one permitted Google account photograph, upload, or email a receipt image or PDF, select a PDF page when needed, review an automatically suggested crop, rotate it, check image-quality warnings, and privately store both the untouched original and a processed JPEG. Stored receipts can be browsed, compared with their originals, or deleted. It does not include OCR, OpenAI, or FreeAgent yet.
+
+Receipt attachments can also arrive through `receipts@flair.london`. The Gmail, Cloudflare Email Worker, and Firebase Function setup is documented in [docs/EMAIL_INGESTION.md](docs/EMAIL_INGESTION.md).
 
 The app remains a static Next.js PWA hosted on Firebase Hosting. Cropping, rotation, HEIC conversion, conservative image enhancement, and quality analysis happen in the browser. Firestore stores only file and reproducibility metadata; receipt images remain private in Storage and are read with the signed-in Firebase session. Security rules require both the correct UID and a private `fidoOwner` custom claim.
 
@@ -21,7 +23,7 @@ The app remains a static Next.js PWA hosted on Firebase Hosting. Cropping, rotat
 5. Register a Web app and copy its Firebase configuration.
 6. In Google Cloud Billing, add a small budget alert. An alert warns you; it is not a hard spending cap.
 
-Static Hosting, Authentication, Firestore, and Storage are all that this stage uses. There are still no deployed servers or Cloud Functions.
+Camera/file uploads remain static and browser-side. Email ingestion adds one Firebase HTTPS Function plus a Cloudflare Email Worker; neither stores message bodies.
 
 ## 2. Configure locally
 
