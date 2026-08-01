@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { httpsCallable } from "firebase/functions";
 import { getBlob, ref } from "firebase/storage";
-import { storage } from "@/lib/firebase";
+import { functions, storage } from "@/lib/firebase";
 import {
   VerifiedReceiptValuesSchema,
   type ReadyForVerificationExtraction,
@@ -15,6 +16,24 @@ type ReadyReceipt = Extract<Receipt, { status: "ready_for_extraction" }> & {
 };
 
 type FormValues = Record<keyof VerifiedReceiptValues, string>;
+
+type ForeignTransactionSuggestion = {
+  id: string;
+  bankAccountName: string;
+  datedOn: string;
+  amount: string;
+  description: string;
+  fullDescription: string;
+  score: number;
+  confidence: "high" | "medium" | "low";
+  reasons: string[];
+};
+
+type ForeignSuggestionResponse = {
+  suggestions: ForeignTransactionSuggestion[];
+  lastSyncCompletedAt: string | null;
+  writeEnabled: false;
+};
 
 export function ReceiptVerification({
   receipt,
@@ -40,6 +59,10 @@ export function ReceiptVerification({
   const [imageFailed, setImageFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [foreignSuggestions, setForeignSuggestions] = useState<ForeignSuggestionResponse | null>(null);
+  const [foreignSuggestionError, setForeignSuggestionError] = useState<string | null>(null);
+  const [findingForeignTransaction, setFindingForeignTransaction] = useState(false);
+  const [selectedForeignTransactionId, setSelectedForeignTransactionId] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -60,17 +83,68 @@ export function ReceiptVerification({
   }, [receipt.processedStoragePath]);
 
   function update(field: keyof FormValues, value: string) {
+    const invalidatesSuggestion = ["merchantName", "receiptDate", "currency", "grossTotal"].includes(field);
+    const clearsSuggestedGbp = invalidatesSuggestion && selectedForeignTransactionId !== "";
+    if (invalidatesSuggestion) {
+      setForeignSuggestions(null);
+      setForeignSuggestionError(null);
+      setSelectedForeignTransactionId("");
+    } else if (field === "gbpAmountCharged") {
+      setSelectedForeignTransactionId("");
+    }
     setValues((current) => {
-      if (field !== "currency") return { ...current, [field]: value };
+      if (field !== "currency") return {
+        ...current,
+        [field]: value,
+        ...(clearsSuggestedGbp ? { gbpAmountCharged: "" } : {}),
+      };
       const currency = value.toUpperCase().slice(0, 3);
       return {
         ...current,
         currency,
         netTotal: currency && currency !== "GBP" ? "" : current.netTotal,
         vatTotal: currency && currency !== "GBP" ? "" : current.vatTotal,
-        gbpAmountCharged: currency === "GBP" ? "" : current.gbpAmountCharged,
+        gbpAmountCharged: currency === "GBP" || clearsSuggestedGbp ? "" : current.gbpAmountCharged,
       };
     });
+  }
+
+  async function findForeignTransaction() {
+    setForeignSuggestionError(null);
+    if (!values.merchantName.trim() || !values.receiptDate || !values.currency || !values.grossTotal) {
+      setForeignSuggestionError("Complete the merchant, date, currency and gross total first.");
+      return;
+    }
+    setFindingForeignTransaction(true);
+    try {
+      const find = httpsCallable<{
+        receiptId: string;
+        merchantName: string;
+        receiptDate: string;
+        currency: string;
+        grossTotal: string;
+      }, ForeignSuggestionResponse>(functions, "getForeignReceiptMatchOptions");
+      const response = await find({
+        receiptId: receipt.id,
+        merchantName: values.merchantName.trim(),
+        receiptDate: values.receiptDate,
+        currency: values.currency,
+        grossTotal: values.grossTotal,
+      });
+      setForeignSuggestions(response.data);
+    } catch (cause) {
+      setForeignSuggestionError(callableMessage(cause, "Recent transactions could not be checked."));
+    } finally {
+      setFindingForeignTransaction(false);
+    }
+  }
+
+  function chooseForeignTransaction(transaction: ForeignTransactionSuggestion) {
+    const amount = Math.abs(Number(transaction.amount));
+    if (!Number.isFinite(amount) || amount <= 0) return;
+    setValues((current) => ({ ...current, gbpAmountCharged: amount.toFixed(2) }));
+    setSelectedForeignTransactionId(transaction.id);
+    setForeignSuggestionError(null);
   }
 
   async function submit() {
@@ -175,7 +249,49 @@ export function ReceiptVerification({
                   inputMode="decimal"
                   placeholder="0.00"
                 />
-                <p className="foreign-settlement-note">Enter the final GBP amount shown by your card or bank. Fido never estimates exchange rates.</p>
+                <div className="foreign-match-assist">
+                  <div>
+                    <strong>Find it in FreeAgent</strong>
+                    <p>Fido can compare merchant, date and a broad currency range. The bank debit—not an estimated rate—becomes the GBP value.</p>
+                  </div>
+                  <button className="secondary-button" type="button" onClick={() => void findForeignTransaction()} disabled={findingForeignTransaction || saving}>
+                    {findingForeignTransaction ? "Checking…" : "Find GBP transaction"}
+                  </button>
+                </div>
+                {foreignSuggestions && (
+                  <div className="foreign-suggestions" aria-live="polite">
+                    <div className="foreign-suggestions-heading">
+                      <strong>{foreignSuggestions.suggestions.length ? "Likely foreign matches" : "No likely match yet"}</strong>
+                      {foreignSuggestions.lastSyncCompletedAt && <small>Synced {formatDateTime(foreignSuggestions.lastSyncCompletedAt)}</small>}
+                    </div>
+                    {foreignSuggestions.suggestions.length ? (
+                      <div className="foreign-suggestion-list">
+                        {foreignSuggestions.suggestions.map((transaction) => (
+                          <button
+                            key={transaction.id}
+                            className={selectedForeignTransactionId === transaction.id ? "selected" : ""}
+                            type="button"
+                            aria-pressed={selectedForeignTransactionId === transaction.id}
+                            onClick={() => chooseForeignTransaction(transaction)}
+                          >
+                            <span>
+                              <strong>{transaction.description || transaction.fullDescription || "Bank transaction"}</strong>
+                              <small>{transaction.bankAccountName} · {formatReceiptDate(transaction.datedOn)}</small>
+                              <em>{transaction.reasons.join(" · ")}</em>
+                            </span>
+                            <span>
+                              <strong>{formatGbpDebit(transaction.amount)}</strong>
+                              <em className={`match-confidence ${transaction.confidence}`}>{transaction.confidence} · {transaction.score}</em>
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : <p>No recent debit has a strong enough merchant, date and amount combination. Synchronise FreeAgent or enter the bank amount manually.</p>}
+                    {selectedForeignTransactionId && <p className="foreign-selection-confirmed">The exact bank debit has been copied into GBP amount charged. Verify the receipt to continue.</p>}
+                  </div>
+                )}
+                {foreignSuggestionError && <p className="message error" role="alert">{foreignSuggestionError}</p>}
+                <p className="foreign-settlement-note">You can always enter the final GBP amount shown by your card or bank yourself.</p>
               </>
             ) : (
               <div className="verification-row">
@@ -250,4 +366,31 @@ function totalsConflict(values: VerifiedReceiptValues): boolean {
 function toMinorUnits(value: string): bigint {
   const [whole, fraction = ""] = value.split(".");
   return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
+}
+
+function formatGbpDebit(value: string): string {
+  const amount = Math.abs(Number(value));
+  return Number.isFinite(amount)
+    ? new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" }).format(amount)
+    : `GBP ${value}`;
+}
+
+function formatReceiptDate(value: string): string {
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+function formatDateTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "recently" : date.toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
+}
+
+function callableMessage(cause: unknown, fallback: string): string {
+  if (typeof cause === "object" && cause !== null && "message" in cause && typeof cause.message === "string") return cause.message;
+  return fallback;
 }

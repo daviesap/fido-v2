@@ -9,6 +9,7 @@ import {
   fetchFreeAgentBankAccounts,
   fetchFreeAgentBankTransactions,
   fetchFreeAgentIdentity,
+  fetchFreeAgentSpendingCategories,
   FreeAgentRequestError,
   refreshFreeAgentTokens,
 } from "./freeagent.js";
@@ -203,6 +204,50 @@ describe("FreeAgent OAuth", () => {
       transactionId: "fit-8",
       updatedAt: "2026-07-31T13:00:00Z",
     }]);
+  });
+
+  it("returns only the spending categories needed for expenses", async () => {
+    const fetchImpl = async () => new Response(JSON.stringify({
+      admin_expenses_categories: [{
+        url: "https://api.freeagent.com/v2/categories/285",
+        description: "Accommodation and Meals",
+        nominal_code: "285",
+        group_description: "Admin expenses (normally VATable)",
+        allowable_for_tax: true,
+        auto_sales_tax_rate: "Standard rate",
+      }],
+      cost_of_sales_categories: [{
+        url: "https://api.freeagent.com/v2/categories/102",
+        description: "Commission Paid",
+        nominal_code: "102",
+        allowable_for_tax: true,
+      }],
+      income_categories: [{ url: "https://api.freeagent.com/v2/categories/001", description: "Sales", nominal_code: "001" }],
+      general_categories: [{ url: "https://api.freeagent.com/v2/categories/051", description: "Interest", nominal_code: "051" }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+
+    await expect(fetchFreeAgentSpendingCategories("access", fetchImpl)).resolves.toEqual([
+      {
+        id: "285",
+        url: "https://api.freeagent.com/v2/categories/285",
+        description: "Accommodation and Meals",
+        nominalCode: "285",
+        group: "Admin expenses",
+        groupDescription: "Admin expenses (normally VATable)",
+        allowableForTax: true,
+        autoSalesTaxRate: "Standard rate",
+      },
+      {
+        id: "102",
+        url: "https://api.freeagent.com/v2/categories/102",
+        description: "Commission Paid",
+        nominalCode: "102",
+        group: "Cost of sales",
+        groupDescription: "Cost of sales",
+        allowableForTax: true,
+        autoSalesTaxRate: null,
+      },
+    ]);
   });
 
   it("rejects non-production resource URLs returned by FreeAgent", async () => {

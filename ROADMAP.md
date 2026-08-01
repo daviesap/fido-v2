@@ -13,8 +13,8 @@ The roadmap is deliberately incremental. Each stage should leave the app usable,
 | 3 | Email receipts into Fido | Complete |
 | 4 | Extract structured receipt data with OpenAI | Complete |
 | 5 | Connect a live FreeAgent account securely | Complete |
-| 6 | Import and display FreeAgent bank transactions | In progress |
-| 7 | Suggest matches or choose out-of-pocket treatment | Planned |
+| 6 | Import and display FreeAgent bank transactions | Complete |
+| 7 | Suggest matches or choose out-of-pocket treatment | In progress |
 | 8 | Confirm and send receipts or expenses to FreeAgent | Planned |
 | 9 | Harden, monitor, and prepare for regular use | Planned |
 
@@ -224,7 +224,7 @@ The owner can connect and verify the intended live account, refresh an expired a
 
 **Goal:** create a local, read-only view of the transactions that receipts may match.
 
-### Implemented in the Stage 6 branch
+### Delivered
 
 - Owner-only discovery of active FreeAgent bank and credit-card accounts without retaining account numbers or balances.
 - Explicit account selection restricted to active GBP accounts.
@@ -263,6 +263,21 @@ Fido can repeatedly synchronise the selected accounts without duplicates or data
 ## Stage 7 — Suggest matches or choose out-of-pocket treatment
 
 **Goal:** rank likely matches transparently while keeping the user in control, including when no participating bank transaction should exist.
+
+### Implemented in the Stage 7 branch
+
+- Owner-only, server-side ranking against the private synchronised transaction cache.
+- Exact GBP debit amount as the suggestion gate, using the verified gross total for GBP receipts and the owner-entered GBP charge for foreign receipts.
+- A ±3-day candidate window with deterministic date and merchant-similarity scoring.
+- High, medium, and low confidence labels with separate amount, date, and merchant factors plus plain-language reasons.
+- Top-three suggestions, searchable manual transaction selection, and no automatic confirmation.
+- Distinct **Bank transaction**, **Paid personally or cash**, and **No match yet** treatments.
+- Live FreeAgent admin-expense and cost-of-sales category selection; OpenAI never selects an accounting category.
+- Reviewable foreign and GBP out-of-pocket proposals with negative payment values, explicit VAT treatment, description, claimant, and processed JPEG attachment name.
+- Private proposal storage outside browser-readable Firestore paths, prevention of one transaction being proposed for two receipts, and cleanup on receipt deletion or FreeAgent disconnect.
+- **Ready to match** and **Proposal ready** receipt queues, including a mobile matching sheet.
+- A pre-verification foreign-receipt helper that ranks likely GBP debits by merchant, date, and broad currency plausibility, then copies the selected bank amount for owner confirmation.
+- A strict Stage 7 read-only boundary: no FreeAgent `POST`, `PUT`, or `DELETE` request is implemented.
 
 ### Candidate generation
 

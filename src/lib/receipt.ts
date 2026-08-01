@@ -197,6 +197,13 @@ const ProcessingFieldsSchema = z.object({
 
 const ProcessedReceiptSchema = ReceiptBaseSchema.merge(ProcessingFieldsSchema);
 
+const ReceiptMatchingSummarySchema = z.object({
+  state: z.literal("proposed"),
+  type: z.enum(["transaction", "out_of_pocket", "unmatched"]),
+  label: z.string().min(1).max(160),
+  updatedAt: z.unknown(),
+});
+
 export const ReceiptSchema = z.discriminatedUnion("status", [
   ReceiptBaseSchema.extend({ status: z.literal("stored") }),
   ReceiptBaseSchema.merge(EmailFieldsSchema).extend({ status: z.literal("needs_review") }),
@@ -209,13 +216,14 @@ export const ReceiptSchema = z.discriminatedUnion("status", [
     extraction: ReadyForVerificationExtractionSchema,
     verifiedData: StoredVerifiedReceiptValuesSchema,
     verifiedAt: z.unknown(),
+    matching: ReceiptMatchingSummarySchema.optional(),
   }),
 ]);
 
 export type Receipt = z.infer<typeof ReceiptSchema> & { id: string };
 export type VerifiedReceiptValues = z.infer<typeof VerifiedReceiptValuesSchema>;
 export type ReadyForVerificationExtraction = z.infer<typeof ReadyForVerificationExtractionSchema>;
-export type ReceiptQueue = "needs_review" | "extracting" | "ready_to_verify" | "verified" | "problems" | "original";
+export type ReceiptQueue = "needs_review" | "extracting" | "ready_to_verify" | "ready_to_match" | "proposed" | "problems" | "original";
 
 export function displayStoragePath(receipt: Receipt): string {
   return hasProcessedAsset(receipt) ? receipt.processedStoragePath : receipt.storagePath;
@@ -227,7 +235,7 @@ export function hasProcessedAsset(receipt: Receipt): receipt is Extract<Receipt,
 
 export function receiptQueue(receipt: Receipt): ReceiptQueue {
   if (receipt.status === "needs_review") return "needs_review";
-  if (receipt.status === "verified") return "verified";
+  if (receipt.status === "verified") return receipt.matching ? "proposed" : "ready_to_match";
   if (receipt.status === "stored") return "original";
   if (!receipt.extraction || receipt.extraction.state === "queued" || receipt.extraction.state === "processing") return "extracting";
   if (receipt.extraction.state === "ready_for_verification") return "ready_to_verify";
@@ -241,7 +249,8 @@ export function receiptStatusLabel(receipt: Receipt): string {
     needs_review: "Needs image review",
     extracting: "Extracting",
     ready_to_verify: "Ready to verify",
-    verified: "Verified",
+    ready_to_match: "Ready to match",
+    proposed: "Proposal ready",
     problems: "Problem",
     original: "Original only",
   }[queue];

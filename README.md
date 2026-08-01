@@ -8,6 +8,8 @@ Background extraction, Firebase secret setup, and production verification are do
 
 Live FreeAgent OAuth architecture, secret setup, and deployment are documented in [docs/FREEAGENT_OAUTH.md](docs/FREEAGENT_OAUTH.md).
 
+Read-only transaction matching and out-of-pocket proposal behaviour are documented in [docs/RECEIPT_MATCHING.md](docs/RECEIPT_MATCHING.md).
+
 Read-only bank account selection, transaction synchronisation, and the planned out-of-pocket workflow are documented in [docs/FREEAGENT_BANKING.md](docs/FREEAGENT_BANKING.md).
 
 The app remains a static Next.js PWA hosted on Firebase Hosting. Cropping, rotation, HEIC conversion, conservative image enhancement, and quality analysis happen in the browser. Firestore stores file metadata plus validated receipt-level totals; receipt images remain private in Storage and are read with the signed-in Firebase session. Security rules require both the correct UID and a private `fidoOwner` custom claim.
