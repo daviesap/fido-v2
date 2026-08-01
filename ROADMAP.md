@@ -149,11 +149,13 @@ Reuse the trusted server-side component introduced for email ingestion for OpenA
   - merchant name and address;
   - receipt/invoice number;
   - transaction date and time;
-  - currency;
-  - subtotal, tax/VAT, tip, and total;
-  - VAT registration number and tax-rate breakdown;
+  - currency, including non-GBP receipts;
+  - gross total;
+  - net total and VAT amount when they are explicitly shown on a UK VAT receipt;
+  - VAT registration number when present;
   - payment method and masked card digits;
-  - line items (useful, but not required for matching).
+- Do not extract or store line-item detail; Fido only needs receipt-level totals for accounting and transaction matching.
+- Treat missing VAT as valid for non-UK receipts. Preserve the original currency and gross total, and do not infer UK VAT or flag its absence as an extraction error.
 - Store field-level confidence or warnings, model identifier, schema version, and prompt version.
 - Add a review form that highlights missing or uncertain fields and lets the user correct them.
 - Preserve the raw extraction response only when it is needed for debugging, with restricted access and a short retention period.
@@ -161,15 +163,15 @@ Reuse the trusted server-side component introduced for email ingestion for OpenA
 
 ### Quality and safety
 
-- Validate that subtotal, tax, tip, and total are arithmetically plausible.
+- When net and VAT are both present, validate that they plausibly add up to the gross total. Do not invent a net amount or VAT amount when the receipt does not state one.
 - Parse money as decimal strings or integer minor units, never floating-point values.
 - Treat model output as untrusted input and validate dates, currency codes, and field lengths.
-- Build an anonymised test set covering crumpled, long, faded, handwritten, foreign-currency, and multi-rate VAT receipts.
+- Build an anonymised test set covering crumpled, long, faded, handwritten, UK VAT, and foreign-currency receipts with no VAT.
 - Make extraction repeatable from a chosen schema/prompt version without overwriting user corrections.
 
 ### Definition of done
 
-For the test set, Fido reliably extracts merchant, date, currency, and total, clearly marks uncertainty, and lets the user approve or correct every value.
+For the test set, Fido reliably extracts merchant, date, currency, and gross total; captures net and VAT only when applicable; clearly marks uncertainty; and lets the user approve or correct every value.
 
 ---
 
