@@ -86,7 +86,7 @@ The user can approve a legible, correctly oriented receipt image, and both the u
 
 ### Implemented
 
-- Cloudflare Email Worker with MIME parsing, inline-image filtering, attachment/count/size limits, and exact-recipient checks.
+- Cloudflare Email Worker with MIME parsing, inline-image filtering, attachment/count/size limits, exact-recipient checks, and safe body-to-PDF fallback for attachment-free receipts.
 - HMAC-SHA256 payload signing with a timestamp and nonce.
 - Firebase HTTPS Function with signature verification, strict payload parsing, byte-level file detection, rate limiting, deterministic deduplication, and private original storage.
 - `needs_review` receipt state with immutable email provenance and owner-only review transition rules.
@@ -122,13 +122,9 @@ These are useful hardening improvements rather than blockers for the working sin
 - Show actionable delivery failures in the app and optionally send a minimal acknowledgement or rejection email without including receipt contents.
 - Add rate limits, abuse monitoring, retry-safe processing, and a dead-letter/recovery path.
 
-### Later enhancement
-
-When a forwarded receipt has no usable attachment, Fido may offer to render a sanitised printable HTML email body as the original receipt. This should follow attachment ingestion because HTML email has a larger security and privacy surface.
-
 ### Definition of done
 
-An email from an authorised sender to the private receipt address creates each valid attachment exactly once in the review queue, while forged, oversized, unsupported, duplicated, or unauthenticated deliveries are rejected safely and visibly.
+An email from an authorised sender to the private receipt address creates each valid attachment—or a safe PDF fallback for a readable attachment-free body—exactly once in the review queue, while forged, oversized, unsupported, duplicated, or unauthenticated deliveries are rejected safely and visibly.
 
 ---
 
