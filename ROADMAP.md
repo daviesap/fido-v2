@@ -11,7 +11,7 @@ The roadmap is deliberately incremental. Each stage should leave the app usable,
 | 1 | Upload and privately store a receipt | Complete |
 | 2 | Crop, rotate, and improve the receipt image | Complete |
 | 3 | Email receipts into Fido | Complete |
-| 4 | Extract structured receipt data with OpenAI | In progress |
+| 4 | Extract structured receipt data with OpenAI | Complete |
 | 5 | Connect a live FreeAgent account securely | Planned |
 | 6 | Import and display FreeAgent bank transactions | Planned |
 | 7 | Suggest transaction-to-receipt matches | Planned |
@@ -149,6 +149,8 @@ Receipt capture remains fast: approving the processed image creates the receipt 
 - OpenAI Responses API image input with Structured Outputs, `store: false`, and a versioned prompt/schema.
 - Server validation of dates, ISO currencies, decimal-string totals, field confidence, and net/VAT reconciliation.
 - Deterministic removal of net and VAT output for non-GBP receipts, even if the model returns it.
+- A short, editable purchase description generated without retaining line-item data.
+- Manual capture of the final GBP card or bank charge for non-GBP receipts; Fido never estimates exchange rates.
 - Review-queue filters, uncertainty highlighting, retry controls, and **Verify & next**.
 - A mobile verification sheet that scrolls independently and keeps its actions reachable.
 - Separation between immutable model extraction and owner-corrected verified values.
@@ -160,6 +162,7 @@ Receipt capture remains fast: approving the processed image creates the receipt 
 - Require schema-constrained structured output and validate it server-side.
 - Extract, where present:
   - merchant name;
+  - a short plain-language description of the overall purchase;
   - receipt date;
   - currency, including non-GBP receipts;
   - gross total;
@@ -167,6 +170,7 @@ Receipt capture remains fast: approving the processed image creates the receipt 
 - Do not extract or store line-item detail; Fido only needs receipt-level totals for accounting and transaction matching.
 - Do not extract merchant addresses, receipt numbers, transaction times, VAT registration numbers, payment methods, card digits, or accounting categories; FreeAgent transaction matching does not require them.
 - Treat missing VAT as valid for non-UK receipts. Preserve the original currency and gross total, and do not infer UK VAT or flag its absence as an extraction error.
+- Because every participating FreeAgent bank account is GBP, require the owner to enter the final GBP amount charged before verifying a non-GBP receipt. Never calculate or estimate foreign exchange; the later FreeAgent transaction remains authoritative for matching.
 - Store field-level confidence or warnings, model identifier, schema version, and prompt version.
 - Add a review form that highlights missing or uncertain fields and lets the user correct them.
 - Do not preserve the raw extraction response. Store only the validated fields, model/prompt/schema versions, token usage, and processing duration.
@@ -181,7 +185,7 @@ Receipt capture remains fast: approving the processed image creates the receipt 
 
 ### Definition of done
 
-For the test set, Fido reliably extracts merchant, date, currency, and gross total; captures net and VAT only when applicable; clearly marks uncertainty; and lets the user approve or correct every value.
+For the test set, Fido reliably extracts merchant, a short purchase description, date, currency, and gross total; captures net and VAT only when applicable; requires the real GBP charge for foreign receipts; clearly marks uncertainty; and lets the user approve or correct every value.
 
 ---
 
@@ -248,7 +252,7 @@ Fido can repeatedly synchronise the selected accounts without duplicates or data
 
 Start with deterministic rules before considering another model call:
 
-- exact currency and absolute amount match;
+- exact GBP amount match, using the original gross amount for GBP receipts and the owner-entered GBP charge for foreign receipts;
 - purchase/debit sign appropriate to the selected account;
 - transaction date close to the receipt date (initially the same day, then a configurable window such as ±3 days);
 - merchant similarity against the transaction description;

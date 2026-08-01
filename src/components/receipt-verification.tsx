@@ -28,11 +28,13 @@ export function ReceiptVerification({
   const result = receipt.extraction.result;
   const [values, setValues] = useState<FormValues>({
     merchantName: result.merchantName ?? "",
+    purchaseDescription: result.purchaseDescription ?? "",
     receiptDate: result.receiptDate ?? "",
     currency: result.currency ?? "",
     grossTotal: result.grossTotal ?? "",
     netTotal: result.netTotal ?? "",
     vatTotal: result.vatTotal ?? "",
+    gbpAmountCharged: "",
   });
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [imageFailed, setImageFailed] = useState(false);
@@ -58,21 +60,30 @@ export function ReceiptVerification({
   }, [receipt.processedStoragePath]);
 
   function update(field: keyof FormValues, value: string) {
-    setValues((current) => ({
-      ...current,
-      [field]: field === "currency" ? value.toUpperCase().slice(0, 3) : value,
-    }));
+    setValues((current) => {
+      if (field !== "currency") return { ...current, [field]: value };
+      const currency = value.toUpperCase().slice(0, 3);
+      return {
+        ...current,
+        currency,
+        netTotal: currency && currency !== "GBP" ? "" : current.netTotal,
+        vatTotal: currency && currency !== "GBP" ? "" : current.vatTotal,
+        gbpAmountCharged: currency === "GBP" ? "" : current.gbpAmountCharged,
+      };
+    });
   }
 
   async function submit() {
     setError(null);
     const parsed = VerifiedReceiptValuesSchema.safeParse({
       merchantName: values.merchantName,
+      purchaseDescription: values.purchaseDescription,
       receiptDate: values.receiptDate,
       currency: values.currency,
       grossTotal: values.grossTotal,
-      netTotal: values.netTotal || null,
-      vatTotal: values.vatTotal || null,
+      netTotal: values.currency === "GBP" ? values.netTotal || null : null,
+      vatTotal: values.currency === "GBP" ? values.vatTotal || null : null,
+      gbpAmountCharged: values.currency !== "GBP" ? values.gbpAmountCharged || null : null,
     });
     if (!parsed.success) {
       setError(parsed.error.issues[0]?.message ?? "Check the receipt values.");
@@ -121,6 +132,14 @@ export function ReceiptVerification({
               onChange={(value) => update("merchantName", value)}
               autoComplete="organization"
             />
+            <VerificationField
+              label="Purchase description"
+              value={values.purchaseDescription}
+              uncertain={isUncertain(result.confidence.purchaseDescription ?? "not_present")}
+              onChange={(value) => update("purchaseDescription", value)}
+              placeholder="Speaker stands"
+              maxLength={80}
+            />
             <div className="verification-row">
               <VerificationField
                 label="Receipt date"
@@ -146,24 +165,38 @@ export function ReceiptVerification({
               inputMode="decimal"
               placeholder="0.00"
             />
-            <div className="verification-row">
-              <VerificationField
-                label="Net total (if printed)"
-                value={values.netTotal}
-                uncertain={isUncertain(result.confidence.netTotal)}
-                onChange={(value) => update("netTotal", value)}
-                inputMode="decimal"
-                placeholder="Optional"
-              />
-              <VerificationField
-                label="VAT total (UK only)"
-                value={values.vatTotal}
-                uncertain={isUncertain(result.confidence.vatTotal)}
-                onChange={(value) => update("vatTotal", value)}
-                inputMode="decimal"
-                placeholder="Optional"
-              />
-            </div>
+            {values.currency && values.currency !== "GBP" ? (
+              <>
+                <VerificationField
+                  label="GBP amount charged"
+                  value={values.gbpAmountCharged}
+                  uncertain={false}
+                  onChange={(value) => update("gbpAmountCharged", value)}
+                  inputMode="decimal"
+                  placeholder="0.00"
+                />
+                <p className="foreign-settlement-note">Enter the final GBP amount shown by your card or bank. Fido never estimates exchange rates.</p>
+              </>
+            ) : (
+              <div className="verification-row">
+                <VerificationField
+                  label="Net total (if printed)"
+                  value={values.netTotal}
+                  uncertain={isUncertain(result.confidence.netTotal)}
+                  onChange={(value) => update("netTotal", value)}
+                  inputMode="decimal"
+                  placeholder="Optional"
+                />
+                <VerificationField
+                  label="VAT total (UK only)"
+                  value={values.vatTotal}
+                  uncertain={isUncertain(result.confidence.vatTotal)}
+                  onChange={(value) => update("vatTotal", value)}
+                  inputMode="decimal"
+                  placeholder="Optional"
+                />
+              </div>
+            )}
 
             {result.warnings.length > 0 && (
               <div className="extraction-warnings">
@@ -195,7 +228,7 @@ function VerificationField({
   value: string;
   uncertain: boolean;
   onChange(value: string): void;
-} & Pick<React.InputHTMLAttributes<HTMLInputElement>, "type" | "inputMode" | "placeholder" | "autoComplete">) {
+} & Pick<React.InputHTMLAttributes<HTMLInputElement>, "type" | "inputMode" | "placeholder" | "autoComplete" | "maxLength">) {
   return (
     <label className={`verification-field ${uncertain ? "uncertain" : ""}`}>
       <span>{label}{uncertain && <em>Check</em>}</span>

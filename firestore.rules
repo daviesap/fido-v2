@@ -124,20 +124,32 @@ service cloud.firestore {
 
     function isValidVerifiedData(data) {
       return data is map
+        && data.keys().hasAll([
+          'merchantName', 'purchaseDescription', 'receiptDate', 'currency',
+          'grossTotal', 'netTotal', 'vatTotal', 'gbpAmountCharged'
+        ])
         && data.keys().hasOnly([
-          'merchantName', 'receiptDate', 'currency', 'grossTotal',
-          'netTotal', 'vatTotal'
+          'merchantName', 'purchaseDescription', 'receiptDate', 'currency',
+          'grossTotal', 'netTotal', 'vatTotal', 'gbpAmountCharged'
         ])
         && data.merchantName is string
         && data.merchantName.size() > 0
         && data.merchantName.size() <= 160
+        && data.purchaseDescription is string
+        && data.purchaseDescription.size() > 0
+        && data.purchaseDescription.size() <= 80
         && data.receiptDate is string
         && data.receiptDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
         && data.currency is string
         && data.currency.matches('^[A-Z]{3}$')
         && isValidMoney(data.grossTotal)
         && (data.netTotal == null || isValidMoney(data.netTotal))
-        && (data.vatTotal == null || isValidMoney(data.vatTotal));
+        && (data.vatTotal == null || isValidMoney(data.vatTotal))
+        && (
+          (data.currency == 'GBP' && data.gbpAmountCharged == null)
+          || (data.currency != 'GBP' && isValidMoney(data.gbpAmountCharged))
+        )
+        && (data.currency == 'GBP' || (data.netTotal == null && data.vatTotal == null));
     }
 
     function isVerificationUpdate() {

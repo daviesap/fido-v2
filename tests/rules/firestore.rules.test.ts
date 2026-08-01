@@ -103,11 +103,13 @@ const readyExtraction = {
 
 const verifiedData = {
   merchantName: "Corner Shop",
+  purchaseDescription: "Coffee",
   receiptDate: "2026-07-31",
   currency: "GBP",
   grossTotal: "12.00",
   netTotal: "10.00",
   vatTotal: "2.00",
+  gbpAmountCharged: null,
 };
 
 describe("Firestore receipt rules", () => {
@@ -224,6 +226,29 @@ describe("Firestore receipt rules", () => {
     }));
   });
 
+  it("accepts a user-supplied GBP charge for a foreign receipt", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "receipts/receipt-1"), {
+        ...reviewedReceipt,
+        extraction: readyExtraction,
+      });
+    });
+    const db = testEnv.authenticatedContext(ownerUid, { fidoOwner: true }).firestore();
+
+    await assertSucceeds(updateDoc(doc(db, "receipts/receipt-1"), {
+      status: "verified",
+      verifiedData: {
+        ...verifiedData,
+        currency: "EUR",
+        grossTotal: "18.40",
+        netTotal: null,
+        vatTotal: null,
+        gbpAmountCharged: "16.12",
+      },
+      verifiedAt: serverTimestamp(),
+    }));
+  });
+
   it("rejects invalid verification values and client changes to extraction state", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "receipts/receipt-1"), {
@@ -237,6 +262,21 @@ describe("Firestore receipt rules", () => {
     await assertFails(updateDoc(receiptRef, {
       status: "verified",
       verifiedData: { ...verifiedData, currency: "£" },
+      verifiedAt: serverTimestamp(),
+    }));
+    await assertFails(updateDoc(receiptRef, {
+      status: "verified",
+      verifiedData: { ...verifiedData, currency: "EUR", netTotal: null, vatTotal: null },
+      verifiedAt: serverTimestamp(),
+    }));
+    await assertFails(updateDoc(receiptRef, {
+      status: "verified",
+      verifiedData: { ...verifiedData, gbpAmountCharged: "9.00" },
+      verifiedAt: serverTimestamp(),
+    }));
+    await assertFails(updateDoc(receiptRef, {
+      status: "verified",
+      verifiedData: { ...verifiedData, purchaseDescription: "" },
       verifiedAt: serverTimestamp(),
     }));
     await assertFails(updateDoc(receiptRef, {

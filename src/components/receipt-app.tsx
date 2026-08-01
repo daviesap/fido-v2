@@ -455,6 +455,7 @@ function ReceiptCard({
     ? receipt.extraction.result
     : null;
   const values = receipt.status === "verified" ? receipt.verifiedData : extracted;
+  const gbpAmountCharged = receipt.status === "verified" ? receipt.verifiedData.gbpAmountCharged ?? null : null;
   const displayName = values?.merchantName ?? receipt.originalFileName;
   return (
     <article className="receipt-card">
@@ -474,6 +475,10 @@ function ReceiptCard({
         <strong title={receipt.originalFileName}>{displayName}</strong>
         {values && (
           <dl className="receipt-values">
+            <div className="receipt-value-description">
+              <dt>Description</dt>
+              <dd>{values.purchaseDescription ?? "—"}</dd>
+            </div>
             <div className="receipt-value-date">
               <dt>Receipt date</dt>
               <dd>{formatReceiptDate(values.receiptDate)}</dd>
@@ -494,6 +499,12 @@ function ReceiptCard({
               <dt>VAT</dt>
               <dd>{values.vatTotal ?? "—"}</dd>
             </div>
+            {values.currency && values.currency !== "GBP" && (
+              <div className="receipt-value-gbp">
+                <dt>GBP charged</dt>
+                <dd>{gbpAmountCharged ?? "—"}</dd>
+              </div>
+            )}
           </dl>
         )}
         {needsReview && <small className="email-origin">From {receipt.email.sender}</small>}

@@ -43,10 +43,19 @@ const MoneySchema = z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/);
 const CurrencySchema = z.string().regex(/^[A-Z]{3}$/);
 const DateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(isCalendarDate);
 const ConfidenceSchema = z.enum(["high", "medium", "low", "not_present"]);
-const EXTRACTION_FIELDS = ["merchantName", "receiptDate", "currency", "grossTotal", "netTotal", "vatTotal"] as const;
+const EXTRACTION_FIELDS = [
+  "merchantName",
+  "purchaseDescription",
+  "receiptDate",
+  "currency",
+  "grossTotal",
+  "netTotal",
+  "vatTotal",
+] as const;
 
 export const ReceiptExtractionResultSchema = z.object({
   merchantName: z.string().trim().min(1).max(160).nullable(),
+  purchaseDescription: z.string().trim().min(1).max(80).nullable().optional(),
   receiptDate: DateSchema.nullable(),
   currency: CurrencySchema.nullable(),
   grossTotal: MoneySchema.nullable(),
@@ -54,6 +63,7 @@ export const ReceiptExtractionResultSchema = z.object({
   vatTotal: MoneySchema.nullable(),
   confidence: z.object({
     merchantName: ConfidenceSchema,
+    purchaseDescription: ConfidenceSchema.optional(),
     receiptDate: ConfidenceSchema,
     currency: ConfidenceSchema,
     grossTotal: ConfidenceSchema,
@@ -70,13 +80,38 @@ export const ReceiptExtractionResultSchema = z.object({
   }
 });
 
-export const VerifiedReceiptValuesSchema = z.object({
+const VerifiedReceiptValuesShape = {
   merchantName: z.string().trim().min(1, "Enter the merchant name.").max(160),
+  purchaseDescription: z.string().trim().min(1, "Enter a short purchase description.").max(80),
   receiptDate: DateSchema,
   currency: CurrencySchema,
   grossTotal: MoneySchema.refine((value) => moneyToMinorUnits(value) > 0n, "Enter a total greater than zero."),
   netTotal: MoneySchema.nullable(),
   vatTotal: MoneySchema.nullable(),
+  gbpAmountCharged: MoneySchema.refine((value) => moneyToMinorUnits(value) > 0n, "Enter a GBP amount greater than zero.").nullable(),
+};
+
+export const VerifiedReceiptValuesSchema = z.object(VerifiedReceiptValuesShape).superRefine((value, context) => {
+  if (value.currency === "GBP" && value.gbpAmountCharged !== null) {
+    context.addIssue({ code: "custom", path: ["gbpAmountCharged"], message: "Leave the GBP amount charged blank for GBP receipts." });
+  }
+  if (value.currency !== "GBP" && value.gbpAmountCharged === null) {
+    context.addIssue({ code: "custom", path: ["gbpAmountCharged"], message: "Enter the final GBP amount charged by your card or bank." });
+  }
+  if (value.currency !== "GBP" && (value.netTotal !== null || value.vatTotal !== null)) {
+    context.addIssue({ code: "custom", path: ["currency"], message: "VAT totals are only stored for GBP receipts." });
+  }
+});
+
+const StoredVerifiedReceiptValuesSchema = z.object({
+  merchantName: VerifiedReceiptValuesShape.merchantName,
+  purchaseDescription: VerifiedReceiptValuesShape.purchaseDescription.optional(),
+  receiptDate: VerifiedReceiptValuesShape.receiptDate,
+  currency: VerifiedReceiptValuesShape.currency,
+  grossTotal: VerifiedReceiptValuesShape.grossTotal,
+  netTotal: VerifiedReceiptValuesShape.netTotal,
+  vatTotal: VerifiedReceiptValuesShape.vatTotal,
+  gbpAmountCharged: VerifiedReceiptValuesShape.gbpAmountCharged.optional(),
 });
 
 const ExtractionBaseSchema = z.object({
@@ -90,8 +125,8 @@ export const ReadyForVerificationExtractionSchema = ExtractionBaseSchema.extend(
   startedAt: z.unknown(),
   completedAt: z.unknown(),
   durationMs: z.number().int().nonnegative(),
-  schemaVersion: z.literal(1),
-  promptVersion: z.literal(1),
+  schemaVersion: z.union([z.literal(1), z.literal(2)]),
+  promptVersion: z.union([z.literal(1), z.literal(2)]),
   model: z.string().min(1),
   usage: z.object({
     inputTokens: z.number().int().nonnegative(),
@@ -99,9 +134,21 @@ export const ReadyForVerificationExtractionSchema = ExtractionBaseSchema.extend(
     totalTokens: z.number().int().nonnegative(),
   }),
   result: ReceiptExtractionResultSchema,
+}).superRefine((value, context) => {
+  if (value.schemaVersion !== value.promptVersion) {
+    context.addIssue({ code: "custom", path: ["promptVersion"], message: "Extraction versions must match." });
+  }
+  if (value.schemaVersion === 2) {
+    if (value.result.purchaseDescription === undefined) {
+      context.addIssue({ code: "custom", path: ["result", "purchaseDescription"], message: "Version 2 requires a purchase description field." });
+    }
+    if (value.result.confidence.purchaseDescription === undefined) {
+      context.addIssue({ code: "custom", path: ["result", "confidence", "purchaseDescription"], message: "Version 2 requires purchase description confidence." });
+    }
+  }
 });
 
-export const ReceiptExtractionSchema = z.discriminatedUnion("state", [
+export const ReceiptExtractionSchema = z.union([
   ExtractionBaseSchema.extend({
     state: z.literal("queued"),
     lastErrorCode: z.string().max(80).optional(),
@@ -160,7 +207,7 @@ export const ReceiptSchema = z.discriminatedUnion("status", [
   ProcessedReceiptSchema.extend({
     status: z.literal("verified"),
     extraction: ReadyForVerificationExtractionSchema,
-    verifiedData: VerifiedReceiptValuesSchema,
+    verifiedData: StoredVerifiedReceiptValuesSchema,
     verifiedAt: z.unknown(),
   }),
 ]);

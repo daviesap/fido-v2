@@ -1,6 +1,6 @@
 # Fido Receipt Manager — capture, extraction, and review
 
-Fido lets one permitted Google account photograph, upload, or email a receipt image or PDF, review its crop, and privately store both the untouched original and a processed JPEG. A background Firebase task then extracts merchant, date, currency, gross total, and explicit UK net/VAT totals with OpenAI. The owner can correct and verify those values later. FreeAgent integration is not included yet.
+Fido lets one permitted Google account photograph, upload, or email a receipt image or PDF, review its crop, and privately store both the untouched original and a processed JPEG. A background Firebase task then extracts merchant, a short purchase description, date, currency, gross total, and explicit UK net/VAT totals with OpenAI. The owner can correct and verify those values later. Foreign receipts also require the real GBP card or bank charge; Fido never estimates exchange rates. FreeAgent integration is not included yet.
 
 Receipt attachments can also arrive through `receipts@flair.london`. The Gmail, Cloudflare Email Worker, and Firebase Function setup is documented in [docs/EMAIL_INGESTION.md](docs/EMAIL_INGESTION.md).
 
@@ -15,7 +15,7 @@ The app remains a static Next.js PWA hosted on Firebase Hosting. Cropping, rotat
 3. Adjust Fido's crop suggestion and rotate the image if necessary.
 4. Review the processed image and any blur, exposure, contrast, or resolution warnings.
 5. Save the receipt. The browser is released while extraction runs in a private background task.
-6. Later, open **Ready to verify**, correct any uncertain values, and choose **Verify & next**.
+6. Later, open **Ready to verify**, correct any uncertain values, add the real GBP charge for a foreign receipt, and choose **Verify & next**.
 
 ## 1. Create the Firebase project
 

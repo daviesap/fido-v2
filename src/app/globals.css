@@ -93,6 +93,9 @@ img { display: block; max-width: 100%; }
 .receipt-values { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 12px; margin: 5px 0 3px; padding: 12px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .receipt-values div { min-width: 0; }
 .receipt-values .receipt-value-date { grid-column: span 2; }
+.receipt-values .receipt-value-description,
+.receipt-values .receipt-value-gbp { grid-column: 1 / -1; }
+.receipt-values .receipt-value-description dd { font-family: inherit; }
 .receipt-values dt { margin-bottom: 3px; color: var(--muted); font: 500 8px "DM Mono", monospace; letter-spacing: .08em; text-transform: uppercase; }
 .receipt-values dd { margin: 0; overflow: hidden; color: var(--ink); font: 500 12px "DM Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
 .email-origin { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -170,6 +173,7 @@ img { display: block; max-width: 100%; }
 .extraction-warnings { margin: 8px 0 14px; padding: 13px 15px; color: #7e4625; background: #f8e8d1; border-radius: 9px; font-size: 12px; line-height: 1.45; }
 .extraction-warnings ul { margin: 7px 0 0; padding-left: 18px; }
 .extraction-meta { margin: 14px 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.foreign-settlement-note { margin: -5px 0 16px; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .verification-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 18px; }
 
 @media (max-width: 800px) {

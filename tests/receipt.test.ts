@@ -4,6 +4,7 @@ import {
   displayStoragePath,
   formatBytes,
   ReceiptSchema,
+  ReadyForVerificationExtractionSchema,
   receiptQueue,
   receiptStatusLabel,
   receiptContentType,
@@ -144,22 +145,75 @@ describe("receipt display helpers", () => {
   it("accepts verified foreign totals without VAT", () => {
     expect(VerifiedReceiptValuesSchema.parse({
       merchantName: "Café de la Gare",
+      purchaseDescription: "Dinner",
       receiptDate: "2026-07-30",
       currency: "EUR",
       grossTotal: "18.40",
       netTotal: null,
       vatTotal: null,
+      gbpAmountCharged: "16.12",
+    })).toBeTruthy();
+  });
+
+  it("requires the real GBP charge only for foreign receipts", () => {
+    const foreign = {
+      merchantName: "Café de la Gare",
+      purchaseDescription: "Dinner",
+      receiptDate: "2026-07-30",
+      currency: "EUR",
+      grossTotal: "18.40",
+      netTotal: null,
+      vatTotal: null,
+      gbpAmountCharged: null,
+    };
+    expect(() => VerifiedReceiptValuesSchema.parse(foreign)).toThrow(/final GBP amount/);
+    expect(() => VerifiedReceiptValuesSchema.parse({ ...foreign, gbpAmountCharged: "16.12", netTotal: "15.00" })).toThrow(/VAT totals/);
+    expect(() => VerifiedReceiptValuesSchema.parse({ ...foreign, currency: "GBP", gbpAmountCharged: "16.12" })).toThrow(/blank for GBP/);
+  });
+
+  it("keeps version-one extraction records readable", () => {
+    expect(ReadyForVerificationExtractionSchema.parse({
+      state: "ready_for_verification",
+      generation: 1,
+      attemptCount: 1,
+      queuedAt: null,
+      startedAt: null,
+      completedAt: null,
+      durationMs: 100,
+      schemaVersion: 1,
+      promptVersion: 1,
+      model: "gpt-5.6-luna",
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      result: {
+        merchantName: "Legacy Shop",
+        receiptDate: "2026-07-30",
+        currency: "GBP",
+        grossTotal: "10.00",
+        netTotal: null,
+        vatTotal: null,
+        confidence: {
+          merchantName: "high",
+          receiptDate: "high",
+          currency: "high",
+          grossTotal: "high",
+          netTotal: "not_present",
+          vatTotal: "not_present",
+        },
+        warnings: [],
+      },
     })).toBeTruthy();
   });
 
   it("rejects invalid dates, currencies, and numeric money values", () => {
     const values = {
       merchantName: "Shop",
+      purchaseDescription: "Coffee",
       receiptDate: "2026-02-28",
       currency: "GBP",
       grossTotal: "10.00",
       netTotal: null,
       vatTotal: null,
+      gbpAmountCharged: null,
     };
     expect(() => VerifiedReceiptValuesSchema.parse({ ...values, receiptDate: "2026-02-30" })).toThrow();
     expect(() => VerifiedReceiptValuesSchema.parse({ ...values, currency: "GB" })).toThrow();

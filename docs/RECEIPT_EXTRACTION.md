@@ -18,6 +18,7 @@ Cloud Tasks supplies bounded concurrency, three attempts, and exponential backof
 Fido stores only:
 
 - merchant name;
+- a short, plain-language description of the overall purchase;
 - receipt date;
 - ISO 4217 currency;
 - gross total;
@@ -26,6 +27,10 @@ Fido stores only:
 - model, schema and prompt versions, token usage, and processing duration.
 
 Money is stored as a decimal string, never a floating-point value. Non-GBP receipts keep their original currency and always have `null` net/VAT values, enforced after model validation. Line items and unnecessary identifiers are neither requested nor retained.
+
+The owner can edit the generated purchase description during verification. For a non-GBP receipt, verification also requires the final GBP amount shown by the owner's card or bank. That value is user-supplied rather than model-extracted: Fido never calculates an exchange rate. All participating FreeAgent bank accounts are GBP, and the imported FreeAgent transaction amount will be authoritative when matching is added.
+
+Extraction schema and prompt version 2 add the purchase description. Version-1 receipt records remain readable; they simply open with an empty description for the owner to complete.
 
 ## OpenAI configuration
 
@@ -82,8 +87,9 @@ Use one UK VAT receipt and one foreign receipt:
 1. Approve each image and confirm the app returns to the receipt queue immediately.
 2. Confirm states move from **Extracting** to **Ready to verify** without refreshing.
 3. Check the UK gross/net/VAT values and reconciliation warning behavior.
-4. Confirm the foreign currency and gross total are retained while net/VAT remain blank.
-5. Correct a field, select **Verify & next**, and confirm the corrected value persists.
-6. Temporarily test a retryable failure only in a safe environment; confirm it becomes **Problem** after bounded attempts and **Try again** queues a new generation once.
+4. Confirm a useful one-to-six-word purchase description is generated and remains editable.
+5. Confirm the foreign currency and gross total are retained while net/VAT remain blank, and that verification requires the real GBP amount charged.
+6. Correct a field, select **Verify & next**, and confirm the corrected value persists.
+7. Temporarily test a retryable failure only in a safe environment; confirm it becomes **Problem** after bounded attempts and **Try again** queues a new generation once.
 
 Stage 4 should be marked complete only after representative real receipts meet the roadmap definition of done.
