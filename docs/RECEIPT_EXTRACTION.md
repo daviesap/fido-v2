@@ -37,7 +37,13 @@ Store it as a Firebase Functions secret:
 npx firebase functions:secrets:set OPENAI_API_KEY
 ```
 
-The default model is `gpt-5.6-luna`, selected for a bounded extraction workload. `OPENAI_RECEIPT_MODEL` is a server-side Firebase parameter with that default, so the model can be changed later without altering the browser bundle.
+The default model is `gpt-5.6-luna`, selected for a bounded extraction workload. `OPENAI_RECEIPT_MODEL` is a non-secret, server-side Firebase parameter, so the model can be changed later without altering the browser bundle. Before a non-interactive production deploy, copy the example to the project-specific Functions dotenv file:
+
+```bash
+cp functions/.env.example functions/.env.fido-ceb0e
+```
+
+Firebase ignores that project-specific file in Git. Keep the API key in Secret Manager; never add it to this dotenv file.
 
 The API request uses:
 
@@ -62,10 +68,10 @@ npm run emulators
 npm --prefix functions test
 npm --prefix functions run typecheck
 npm --prefix functions run build
-npx firebase deploy --only functions:queueReceiptExtraction,functions:extractReceipt,functions:retryReceiptExtraction,firestore:rules,hosting
+npx firebase deploy --force --only functions:queueReceiptExtraction,functions:extractReceipt,functions:retryReceiptExtraction,firestore:rules,hosting
 ```
 
-The first task-function deployment creates its Cloud Tasks queue. If enqueueing reports an IAM permission error, grant the runtime service account `roles/cloudtasks.enqueuer` and permission to invoke `extractReceipt`, following Firebase's [task queue IAM guidance](https://firebase.google.com/docs/functions/task-functions#iam_permissions).
+`--force` acknowledges the retry policy on the idempotent Firestore trigger. The first task-function deployment creates its Cloud Tasks queue. First-time Eventarc setup can take a few minutes for IAM permissions to propagate; retry the deployment if Firebase reports that specific condition. If enqueueing later reports an IAM permission error, grant the runtime service account `roles/cloudtasks.enqueuer` and permission to invoke `extractReceipt`, following Firebase's [task queue IAM guidance](https://firebase.google.com/docs/functions/task-functions#iam_permissions).
 
 Receipts approved before the Firestore trigger was deployed have no extraction state. They appear with **Start extraction** once, allowing the owner to queue them through the same authenticated, idempotent backend path.
 

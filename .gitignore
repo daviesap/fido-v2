@@ -14,5 +14,6 @@ ui-debug.log
 functions/.env*
 email-worker/.dev.vars*
 !.env.example
+!functions/.env.example
 *.tsbuildinfo
 .DS_Store
