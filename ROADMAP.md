@@ -14,8 +14,8 @@ The roadmap is deliberately incremental. Each stage should leave the app usable,
 | 4 | Extract structured receipt data with OpenAI | Complete |
 | 5 | Connect a live FreeAgent account securely | Complete |
 | 6 | Import and display FreeAgent bank transactions | Complete |
-| 7 | Suggest matches or choose out-of-pocket treatment | In progress |
-| 8 | Confirm and send receipts or expenses to FreeAgent | Planned |
+| 7 | Suggest matches or choose out-of-pocket treatment | Complete |
+| 8 | Confirm and send receipts or expenses to FreeAgent | In progress — 8A delivered |
 | 9 | Harden, monitor, and prepare for regular use | Planned |
 
 ---
@@ -264,7 +264,7 @@ Fido can repeatedly synchronise the selected accounts without duplicates or data
 
 **Goal:** rank likely matches transparently while keeping the user in control, including when no participating bank transaction should exist.
 
-### Implemented in the Stage 7 branch
+### Implemented
 
 - Owner-only, server-side ranking against the private synchronised transaction cache.
 - Exact GBP debit amount as the suggestion gate, using the verified gross total for GBP receipts and the owner-entered GBP charge for foreign receipts.
@@ -320,21 +320,28 @@ On a representative labelled set, likely matches appear near the top with unders
 
 **Goal:** turn a reviewed match or out-of-pocket choice into the intended accounting record, safely and reversibly.
 
+### Stage 8A delivered — attach to an existing explanation
+
+- Re-read the proposed bank transaction and its single existing explanation from live FreeAgent before preview and again before confirmation.
+- Show the transaction, explanation, existing category nominal code, amount, date, and exact processed JPEG before any write.
+- Treat the category as read-only. Stage 8A never creates an explanation and never submits category, amount, date, description, VAT, or accounting fields.
+- Require a separate, short-lived confirmation token whose private fingerprint covers the live explanation—including its category—so any intervening change forces a new preview.
+- Update only the explanation's `attachment` property, enforce FreeAgent's 5 MB limit, and refuse split, partially explained, locked, or already-differently-attached explanations.
+- Read the explanation back from FreeAgent and verify the deterministic attachment filename.
+- Reconcile retries when that deterministic filename is already present rather than uploading a duplicate.
+- Retain a private delivery audit independently of the OAuth/synchronisation cache, expose only a small sent summary on the receipt, and prevent normal deletion of sent receipts.
+- Provide a dedicated **Sent** queue and a final view that states the accounting category and values were unchanged.
+
+FreeAgent categories change infrequently, so Fido deliberately does not maintain a category synchronisation service. Stage 7 fetches the current category list on demand when preparing an out-of-pocket proposal and validates the selected category again when saving it. Stage 8A only displays the category already present on the live explanation. The future Stage 8B expense confirmation will re-fetch and validate the proposal's selected category immediately before creating the Expense.
+
+### Remaining Stage 8B — create an out-of-pocket Expense
+
 ### Scope
 
-- Store a match as a separate auditable record rather than embedding mutable match state in the receipt.
-- Record who confirmed it, when, the scoring inputs, and the FreeAgent identifiers involved.
-- In the FreeAgent sandbox, validate the correct workflow for attaching the receipt to an existing bank transaction/explanation.
 - For an out-of-pocket choice, show the exact Expense payload and create it only after a separate confirmation.
 - Use the authorised user's FreeAgent URL as claimant and the owner-selected FreeAgent category.
 - Send payments to the claimant as negative `gross_value`; for foreign receipts preserve the original currency and amount and use the owner-entered final GBP charge as negative `native_gross_value`.
 - Do not claim UK VAT on foreign-currency expenses. For GBP receipts, show and confirm the proposed VAT treatment rather than inferring an accounting decision silently.
-- Attach the processed receipt JPEG within FreeAgent's 5 MB attachment limit, retaining the immutable original in Fido.
-- Show the exact proposed write before sending anything to FreeAgent.
-- Require explicit confirmation for the first production writes.
-- Use idempotency/duplicate guards and reconcile the result by reading it back.
-- Store the returned FreeAgent resource URL and upload status.
-- Support retry for network failures without creating duplicate explanations or attachments.
 - Define what **Unmatch** means locally and whether any remote change can or should be reversed.
 
 FreeAgent represents categorisation through bank transaction explanations, which can include attachments. Out-of-pocket purchases are separate Expense resources and also support an attachment. Their capabilities and required fields vary, so both final write flows must be proven against the official [bank transaction explanations](https://dev.freeagent.com/docs/bank_transaction_explanations), [expenses](https://dev.freeagent.com/docs/expenses), and [attachments](https://dev.freeagent.com/docs/attachments) documentation before production use.

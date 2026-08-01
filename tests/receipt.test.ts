@@ -230,6 +230,18 @@ describe("receipt display helpers", () => {
     });
     expect(receiptQueue({ id: "id", ...proposed })).toBe("proposed");
     expect(receiptStatusLabel({ id: "id", ...proposed })).toBe("Proposal ready");
+    const sent = ReceiptSchema.parse({
+      ...base,
+      matching: { state: "proposed", type: "transaction", label: "Coffee card payment", updatedAt: null },
+      delivery: {
+        state: "sent",
+        resourceType: "bank_transaction_explanation",
+        label: "Attached to Coffee card payment",
+        sentAt: null,
+      },
+    });
+    expect(receiptQueue({ id: "id", ...sent })).toBe("sent");
+    expect(receiptStatusLabel({ id: "id", ...sent })).toBe("Sent to FreeAgent");
   });
 
   it("requires the real GBP charge only for foreign receipts", () => {

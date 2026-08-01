@@ -82,6 +82,49 @@ type SaveRequest =
   | { receiptId: string; type: "unmatched" };
 type SaveResponse = { proposal: MatchProposal; writeEnabled: false };
 
+type AttachmentTarget = {
+  transactionUrl: string;
+  explanationUrl: string;
+  explanationType: string;
+  categoryUrl: string | null;
+  categoryNominalCode: string | null;
+  datedOn: string;
+  grossValue: string;
+};
+
+type AttachmentDelivery = {
+  state: "sent";
+  operation: "attach_to_existing_explanation";
+  target: AttachmentTarget;
+  attachment: { fileName: string; fileSize: number; contentType: string };
+  sentAt: string | null;
+};
+
+type AttachmentPreview = {
+  state: "ready" | "blocked";
+  receipt: { id: string; merchantName: string; processedSize: number };
+  transaction: { id: string; description: string; datedOn: string; amount: string; bankAccountName: string };
+  explanation: {
+    id: string;
+    type: string;
+    description: string;
+    categoryUrl: string | null;
+    categoryNominalCode: string | null;
+    datedOn: string;
+    grossValue: string;
+    isLocked: boolean;
+    existingAttachment: { fileName: string; fileSize: number } | null;
+  } | null;
+  attachment: { fileName: string; fileSize: number; contentType: "image/jpeg" };
+  blockers: string[];
+  reconcileExisting: boolean;
+  confirmationToken: string | null;
+  writeEnabled: true;
+};
+
+type AttachmentPreviewResponse = AttachmentPreview | { state: "sent"; delivery: AttachmentDelivery; writeEnabled: true };
+type AttachmentConfirmResponse = { delivery: AttachmentDelivery; writeEnabled: true };
+
 export function ReceiptMatching({
   receipt,
   onClose,
@@ -100,11 +143,16 @@ export function ReceiptMatching({
   const [selectedCategoryUrl, setSelectedCategoryUrl] = useState("");
   const [loadingCategories, setLoadingCategories] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreviewResponse | null>(null);
+  const [loadingAttachment, setLoadingAttachment] = useState(true);
+  const [sendingAttachment, setSendingAttachment] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const categoryRequestStarted = useRef(false);
 
   useEffect(() => {
+    if (receipt.delivery) return;
     let active = true;
     const load = httpsCallable<{ receiptId: string }, MatchOptions>(functions, "getReceiptMatchOptions");
     void load({ receiptId: receipt.id })
@@ -119,7 +167,18 @@ export function ReceiptMatching({
       })
       .catch((cause) => active && setError(callableMessage(cause, "Matching options could not be loaded.")));
     return () => { active = false; };
-  }, [receipt.id]);
+  }, [receipt.delivery, receipt.id]);
+
+  useEffect(() => {
+    if (!receipt.delivery && (!options?.existingProposal || options.existingProposal.type !== "transaction")) return;
+    let active = true;
+    const load = httpsCallable<{ receiptId: string }, AttachmentPreviewResponse>(functions, "getReceiptAttachmentPreview");
+    void load({ receiptId: receipt.id })
+      .then((response) => active && setAttachmentPreview(response.data))
+      .catch((cause) => active && setAttachmentError(callableMessage(cause, "The FreeAgent attachment preview could not be loaded.")))
+      .finally(() => active && setLoadingAttachment(false));
+    return () => { active = false; };
+  }, [options?.existingProposal, receipt.delivery, receipt.id]);
 
   useEffect(() => {
     let active = true;
@@ -205,12 +264,30 @@ export function ReceiptMatching({
     }
   }
 
+  async function confirmAttachment() {
+    if (!attachmentPreview || attachmentPreview.state !== "ready" || !attachmentPreview.confirmationToken) return;
+    setSendingAttachment(true);
+    setAttachmentError(null);
+    try {
+      const confirm = httpsCallable<{ receiptId: string; confirmationToken: string }, AttachmentConfirmResponse>(functions, "confirmReceiptAttachment");
+      const response = await confirm({ receiptId: receipt.id, confirmationToken: attachmentPreview.confirmationToken });
+      setAttachmentPreview({ state: "sent", delivery: response.data.delivery, writeEnabled: true });
+      onSaved("Receipt attached to the existing FreeAgent explanation. Its accounting category and amounts were unchanged.");
+    } catch (cause) {
+      setAttachmentError(callableMessage(cause, "The receipt could not be attached to FreeAgent."));
+    } finally {
+      setSendingAttachment(false);
+    }
+  }
+
+  const attachmentSent = attachmentPreview?.state === "sent";
+
   return (
     <div className="matching-backdrop" role="dialog" aria-modal="true" aria-labelledby="matching-title">
       <div className="matching-dialog">
         <header className="review-header">
           <div>
-            <p className="eyebrow">Stage seven · proposal only</p>
+            <p className="eyebrow">{attachmentSent ? "Stage eight · sent" : "Stage eight · preview, then confirm"}</p>
             <h2 id="matching-title">Match the money, then the merchant.</h2>
             <p>{receipt.verifiedData.merchantName} · {formatReceiptDate(receipt.verifiedData.receiptDate)}</p>
           </div>
@@ -242,9 +319,19 @@ export function ReceiptMatching({
           </aside>
 
           <section className="matching-panel">
-            {!options && !error ? <div className="matching-loading"><div className="spinner" /><p>Comparing recent transactions…</p></div> : null}
+            {loadingAttachment && (receipt.delivery || options?.existingProposal?.type === "transaction") && <p className="attachment-loading">Checking the live FreeAgent explanation…</p>}
+            {attachmentPreview && (
+              <AttachmentPanel
+                preview={attachmentPreview}
+                sending={sendingAttachment}
+                onConfirm={() => void confirmAttachment()}
+              />
+            )}
+            {attachmentError && <p className="message error" role="alert">{attachmentError}</p>}
+            {!options && !error && !receipt.delivery ? <div className="matching-loading"><div className="spinner" /><p>Comparing recent transactions…</p></div> : null}
             {options ? (
               <>
+                {!attachmentSent && <>
                 {options.existingProposal && (
                   <p className="proposal-existing">A proposal is already saved. Saving below will replace it; FreeAgent remains unchanged.</p>
                 )}
@@ -324,6 +411,7 @@ export function ReceiptMatching({
                     <p>Use this when the transaction has not arrived yet or you need to investigate it. You can return and replace this choice later.</p>
                   </div>
                 )}
+                </>}
               </>
             ) : null}
             {error && <p className="message error" role="alert">{error}</p>}
@@ -331,14 +419,78 @@ export function ReceiptMatching({
         </div>
 
         <footer className="matching-actions">
-          <p><strong>No accounting write.</strong> Stage 8 will show the final FreeAgent change separately.</p>
+          <p>{attachmentSent
+            ? <><strong>Attached.</strong> The existing explanation and category were left unchanged.</>
+            : <><strong>Separate confirmation.</strong> Saving a proposal does not change FreeAgent.</>}</p>
           <button className="secondary-button" type="button" onClick={onClose} disabled={saving}>Later</button>
-          <button className="primary-button" type="button" onClick={() => void saveProposal()} disabled={!options || saving || (mode === "transaction" && !selectedTransactionId) || (mode === "out_of_pocket" && !selectedCategoryUrl)}>
-            {saving ? "Saving…" : mode === "transaction" ? "Save match proposal" : mode === "out_of_pocket" ? "Save expense proposal" : "Keep unmatched"}
-          </button>
+          {!attachmentSent && <button className="primary-button" type="button" onClick={() => void saveProposal()} disabled={!options || saving || (mode === "transaction" && !selectedTransactionId) || (mode === "out_of_pocket" && !selectedCategoryUrl)}>
+              {saving ? "Saving…" : mode === "transaction" ? "Save match proposal" : mode === "out_of_pocket" ? "Save expense proposal" : "Keep unmatched"}
+            </button>}
         </footer>
       </div>
     </div>
+  );
+}
+
+function AttachmentPanel({
+  preview,
+  sending,
+  onConfirm,
+}: {
+  preview: AttachmentPreviewResponse;
+  sending: boolean;
+  onConfirm(): void;
+}) {
+  if (preview.state === "sent") {
+    return (
+      <section className="attachment-panel sent" aria-label="FreeAgent delivery complete">
+        <div className="attachment-panel-heading">
+          <div><p className="eyebrow">Delivery complete</p><h3>Receipt attached in FreeAgent.</h3></div>
+          <span aria-hidden="true">✓</span>
+        </div>
+        <dl className="attachment-preview-values">
+          <div><dt>Explanation</dt><dd>{preview.delivery.target.explanationType}</dd></div>
+          <div><dt>Category</dt><dd>{categoryLabel(preview.delivery.target.categoryNominalCode)} · unchanged</dd></div>
+          <div><dt>Amount</dt><dd>{formatMoney(String(Math.abs(Number(preview.delivery.target.grossValue))), "GBP")}</dd></div>
+          <div><dt>Receipt file</dt><dd>{preview.delivery.attachment.fileName}</dd></div>
+          <div><dt>Sent</dt><dd>{preview.delivery.sentAt ? formatDateTime(preview.delivery.sentAt) : "Just now"}</dd></div>
+        </dl>
+        <p className="attachment-assurance">Fido changed only the attachment on the existing explanation. The category, date, description, amount and VAT treatment were not submitted.</p>
+      </section>
+    );
+  }
+
+  const explanation = preview.explanation;
+  return (
+    <section className={`attachment-panel ${preview.state}`} aria-label="FreeAgent attachment confirmation">
+      <div className="attachment-panel-heading">
+        <div>
+          <p className="eyebrow">Live FreeAgent check</p>
+          <h3>{preview.state === "ready" ? "Ready for your confirmation." : "Attachment blocked safely."}</h3>
+        </div>
+        <span>{preview.state === "ready" ? "Attachment only" : "No write"}</span>
+      </div>
+      <dl className="attachment-preview-values">
+        <div><dt>Transaction</dt><dd>{preview.transaction.description}</dd></div>
+        <div><dt>Bank account</dt><dd>{preview.transaction.bankAccountName}</dd></div>
+        <div><dt>Date</dt><dd>{formatReceiptDate(preview.transaction.datedOn)}</dd></div>
+        <div><dt>Amount</dt><dd>{formatMoney(String(Math.abs(Number(preview.transaction.amount))), "GBP")}</dd></div>
+        <div><dt>Explanation</dt><dd>{explanation?.type ?? "Not available"}</dd></div>
+        <div><dt>Category</dt><dd>{categoryLabel(explanation?.categoryNominalCode ?? null)} · unchanged</dd></div>
+        <div><dt>Receipt file</dt><dd>{preview.attachment.fileName} · {formatBytes(preview.attachment.fileSize)}</dd></div>
+      </dl>
+      {preview.blockers.length > 0 && (
+        <ul className="attachment-blockers">
+          {preview.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}
+        </ul>
+      )}
+      <p className="attachment-assurance"><strong>Only the JPEG attachment will be sent.</strong> The existing category, date, description, amount and VAT treatment stay exactly as they are in FreeAgent.</p>
+      {preview.state === "ready" && (
+        <button className="attachment-confirm-button" type="button" onClick={onConfirm} disabled={sending || !preview.confirmationToken}>
+          {sending ? "Attaching receipt…" : preview.reconcileExisting ? "Confirm existing attachment" : "Attach receipt to FreeAgent"}
+        </button>
+      )}
+    </section>
   );
 }
 
@@ -357,6 +509,17 @@ function TransactionChoice({ transaction, selected, onSelect, compact = false }:
       </span>
     </label>
   );
+}
+
+function categoryLabel(nominalCode: string | null): string {
+  return nominalCode ? `FreeAgent category ${nominalCode}` : "Existing FreeAgent category";
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "Unknown size";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function formatMoney(value: string, currency: string): string {

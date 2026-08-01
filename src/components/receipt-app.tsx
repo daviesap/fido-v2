@@ -59,6 +59,7 @@ const RECEIPT_FILTERS: { value: ReceiptFilter; label: string }[] = [
   { value: "ready_to_verify", label: "Ready to verify" },
   { value: "ready_to_match", label: "Ready to match" },
   { value: "proposed", label: "Proposals" },
+  { value: "sent", label: "Sent" },
   { value: "problems", label: "Problems" },
 ];
 
@@ -222,6 +223,10 @@ export function ReceiptApp() {
   }
 
   async function remove(receipt: Receipt) {
+    if (receipt.status === "verified" && receipt.delivery) {
+      setMessage({ text: "This receipt is attached in FreeAgent and is retained with its delivery audit.", error: true });
+      return;
+    }
     if (!window.confirm(`Delete ${receipt.originalFileName}? This removes the original and processed image and cannot be undone.`)) return;
     setMessage(null);
     try {
@@ -283,9 +288,9 @@ export function ReceiptApp() {
       </header>
       <main className="page">
         <section className="intro">
-          <p className="eyebrow">Stage seven · matching proposals</p>
+          <p className="eyebrow">Stage eight · reviewed delivery</p>
           <h1>Receipts ready to reconcile.</h1>
-          <p>Fido ranks likely FreeAgent transactions and prepares out-of-pocket expenses, while every accounting change remains behind your review.</p>
+          <p>Fido ranks likely FreeAgent transactions, then attaches a receipt only after a separate live preview and your explicit confirmation.</p>
         </section>
 
         <FreeAgentConnectionCard />
@@ -527,18 +532,20 @@ function ReceiptCard({
           </dl>
         )}
         {needsReview && <small className="email-origin">From {receipt.email.sender}</small>}
-        {receipt.status === "verified" && receipt.matching && <small className="match-summary">{receipt.matching.label}</small>}
+        {receipt.status === "verified" && receipt.matching && !receipt.delivery && <small className="match-summary">{receipt.matching.label}</small>}
+        {receipt.status === "verified" && receipt.delivery && <small className="match-summary">{receipt.delivery.label}</small>}
         <small>Added {date ? date.toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }) : "just now"} · {formatBytes(receipt.size)}</small>
       </div>
       <div className="receipt-card-actions">
         {needsReview && <button className="review-button" onClick={onReview} disabled={opening}>{opening ? "Opening…" : "Review receipt"}</button>}
         {queue === "ready_to_verify" && <button className="review-button" onClick={onVerify}>Verify values</button>}
         {(queue === "ready_to_match" || queue === "proposed") && <button className="review-button" onClick={onMatch}>{queue === "proposed" ? "Review proposal" : "Match receipt"}</button>}
+        {queue === "sent" && <button className="review-button" onClick={onMatch}>View FreeAgent receipt</button>}
         {queue === "problems" && <button className="review-button" onClick={onRetry} disabled={retrying}>{retrying ? "Queuing…" : "Try again"}</button>}
         {queue === "extracting" && receipt.status === "ready_for_extraction" && !receipt.extraction
           ? <button className="review-button" onClick={onRetry} disabled={retrying}>{retrying ? "Queuing…" : "Start extraction"}</button>
           : queue === "extracting" && <small className="background-note">You can leave this page</small>}
-        <button className="delete-button" onClick={onDelete} aria-label={`Delete ${receipt.originalFileName}`}>Delete</button>
+        {queue !== "sent" && <button className="delete-button" onClick={onDelete} aria-label={`Delete ${receipt.originalFileName}`}>Delete</button>}
       </div>
     </article>
   );
@@ -591,7 +598,7 @@ function ReceiptViewer({ receipt, onClose, onDelete }: { receipt: Receipt; onClo
         </div>
         <div className="viewer-footer">
           <span>{showingProcessed ? "Processed" : "Original"} · {shownType} · {formatBytes(shownSize)}</span>
-          <button className="danger-button" onClick={onDelete}>Delete receipt</button>
+          {!(receipt.status === "verified" && receipt.delivery) && <button className="danger-button" onClick={onDelete}>Delete receipt</button>}
         </div>
       </div>
     </div>

@@ -324,6 +324,15 @@ describe("Firestore receipt rules", () => {
         type: "transaction",
         transaction: { id: "8", amount: "-12.40" },
       });
+      await setDoc(doc(context.firestore(), "freeAgentSync/owner-user/attachmentPreviews/receipt-1"), {
+        ownerUid,
+        tokenHash: "private",
+      });
+      await setDoc(doc(context.firestore(), "freeAgentDeliveryAudits/owner-user/receipts/receipt-1"), {
+        ownerUid,
+        state: "sent",
+        sourceSha256: "private",
+      });
     });
     const db = testEnv.authenticatedContext(ownerUid, { fidoOwner: true }).firestore();
 
@@ -332,11 +341,36 @@ describe("Firestore receipt rules", () => {
     await assertFails(getDoc(doc(db, "freeAgentSync/owner-user")));
     await assertFails(getDoc(doc(db, "freeAgentSync/owner-user/transactions/transaction-hash")));
     await assertFails(getDoc(doc(db, "freeAgentSync/owner-user/matchProposals/receipt-1")));
+    await assertFails(getDoc(doc(db, "freeAgentSync/owner-user/attachmentPreviews/receipt-1")));
+    await assertFails(getDoc(doc(db, "freeAgentDeliveryAudits/owner-user/receipts/receipt-1")));
     await assertFails(setDoc(doc(db, "freeAgentSync/owner-user/matchProposals/receipt-2"), {
       ownerUid,
       receiptId: "receipt-2",
       type: "unmatched",
     }));
+  });
+
+  it("retains a receipt after its attachment has been sent to FreeAgent", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "receipts/receipt-1"), {
+        ...reviewedReceipt,
+        status: "verified",
+        extraction: readyExtraction,
+        verifiedData,
+        verifiedAt: serverTimestamp(),
+        matching: { state: "proposed", type: "transaction", label: "Coffee", updatedAt: serverTimestamp() },
+        delivery: {
+          state: "sent",
+          resourceType: "bank_transaction_explanation",
+          label: "Attached to Coffee",
+          sentAt: serverTimestamp(),
+        },
+      });
+    });
+    const db = testEnv.authenticatedContext(ownerUid, { fidoOwner: true }).firestore();
+
+    await assertFails(deleteDoc(doc(db, "receipts/receipt-1")));
+    await assertSucceeds(getDoc(doc(db, "receipts/receipt-1")));
   });
 
   it("denies updates and unexpected fields", async () => {

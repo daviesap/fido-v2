@@ -35,13 +35,17 @@ import {
   encryptSecret,
   exchangeFreeAgentCode,
   fetchFreeAgentBankAccounts,
+  fetchFreeAgentBankTransaction,
+  fetchFreeAgentBankTransactionExplanation,
   fetchFreeAgentBankTransactions,
   fetchFreeAgentIdentity,
   fetchFreeAgentSpendingCategories,
   refreshFreeAgentTokens,
+  updateFreeAgentExplanationAttachment,
   type EncryptedSecret,
   type FreeAgentBankAccount,
   type FreeAgentBankTransaction,
+  type FreeAgentBankTransactionExplanation,
   type FreeAgentIdentity,
   type FreeAgentSpendingCategory,
   type FreeAgentTokens,
@@ -53,6 +57,11 @@ import {
   type MatchingReceipt,
   type RankedTransaction,
 } from "./matching.js";
+import {
+  FREEAGENT_ATTACHMENT_MAX_BYTES,
+  attachmentFileName,
+  evaluateAttachmentEligibility,
+} from "./delivery.js";
 
 initializeApp();
 
@@ -68,6 +77,8 @@ const EXTRACTION_FUNCTION_RESOURCE = `locations/europe-west1/functions/${EXTRACT
 const MAX_EXTRACTION_ATTEMPTS = 3;
 const FREEAGENT_STATE_LIFETIME_MS = 10 * 60 * 1000;
 const FREEAGENT_SYNC_WINDOW_DAYS = 90;
+const ATTACHMENT_PREVIEW_LIFETIME_MS = 10 * 60 * 1000;
+const ATTACHMENT_DELIVERY_STALE_MS = 5 * 60 * 1000;
 
 const FreeAgentAccountSelectionSchema = z.object({
   accountIds: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/)).min(1).max(20),
@@ -76,6 +87,10 @@ const FreeAgentAccountSelectionSchema = z.object({
 const ReceiptMatchRequestSchema = z.object({
   receiptId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
 }).strict();
+
+const ConfirmReceiptAttachmentSchema = ReceiptMatchRequestSchema.extend({
+  confirmationToken: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+});
 
 const ForeignReceiptSuggestionRequestSchema = ReceiptMatchRequestSchema.extend({
   merchantName: z.string().trim().min(1).max(160),
@@ -132,7 +147,10 @@ export const queueReceiptExtraction = onDocumentWritten({
     const deleted = event.data?.before;
     const ownerUid = deleted?.get("ownerUid");
     if (deleted?.exists && typeof ownerUid === "string") {
-      await freeAgentMatchProposalsRef(ownerUid).doc(event.params.receiptId).delete().catch(() => undefined);
+      await Promise.all([
+        freeAgentMatchProposalsRef(ownerUid).doc(event.params.receiptId).delete().catch(() => undefined),
+        freeAgentAttachmentPreviewsRef(ownerUid).doc(event.params.receiptId).delete().catch(() => undefined),
+      ]);
     }
     return;
   }
@@ -714,6 +732,187 @@ export const saveReceiptMatchProposal = onCall({
   return { proposal: publicMatchProposal(saved.data()!), writeEnabled: false as const };
 });
 
+export const getReceiptAttachmentPreview = onCall({
+  region: "europe-west1",
+  secrets: [freeAgentClientId, freeAgentClientSecret, freeAgentTokenEncryptionKey],
+  timeoutSeconds: 60,
+}, async (request) => {
+  const ownerUid = requireOwner(request.auth);
+  const parsed = ReceiptMatchRequestSchema.safeParse(request.data);
+  if (!parsed.success) throw new HttpsError("invalid-argument", "A valid receipt is required.");
+  const receiptId = parsed.data.receiptId;
+  const delivered = await freeAgentDeliveriesRef(ownerUid).doc(receiptId).get();
+  if (delivered.exists && delivered.get("state") === "sent") {
+    return { state: "sent" as const, delivery: publicAttachmentDelivery(delivered.data()!), writeEnabled: true as const };
+  }
+
+  try {
+    const context = await receiptAttachmentContext(ownerUid, receiptId);
+    const target = await liveAttachmentTarget(ownerUid, context.transactionUrl);
+    const fileName = attachmentFileName(receiptId);
+    const eligibility = evaluateAttachmentEligibility({
+      transaction: target.transaction,
+      explanation: target.explanation,
+      assetSize: context.processedSize,
+      expectedFileName: fileName,
+    });
+    let confirmationToken: string | null = null;
+    if (eligibility.eligible) {
+      confirmationToken = randomBytes(32).toString("base64url");
+      await freeAgentAttachmentPreviewsRef(ownerUid).doc(receiptId).set({
+        ownerUid,
+        receiptId,
+        tokenHash: hash(confirmationToken),
+        fingerprint: attachmentTargetFingerprint(context, target),
+        expiresAt: Timestamp.fromMillis(Date.now() + ATTACHMENT_PREVIEW_LIFETIME_MS),
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    } else {
+      await freeAgentAttachmentPreviewsRef(ownerUid).doc(receiptId).delete().catch(() => undefined);
+    }
+    return publicAttachmentPreview(context, target, eligibility, confirmationToken);
+  } catch (cause) {
+    if (cause instanceof HttpsError) throw cause;
+    throw freeAgentCallableError(cause, "The live FreeAgent explanation could not be checked.");
+  }
+});
+
+export const confirmReceiptAttachment = onCall({
+  region: "europe-west1",
+  secrets: [freeAgentClientId, freeAgentClientSecret, freeAgentTokenEncryptionKey],
+  timeoutSeconds: 120,
+  memory: "512MiB",
+  maxInstances: 1,
+}, async (request) => {
+  const ownerUid = requireOwner(request.auth);
+  const parsed = ConfirmReceiptAttachmentSchema.safeParse(request.data);
+  if (!parsed.success) throw new HttpsError("invalid-argument", "Refresh the attachment preview and confirm again.");
+  const { receiptId, confirmationToken } = parsed.data;
+  const deliveryRef = freeAgentDeliveriesRef(ownerUid).doc(receiptId);
+  const existingDelivery = await deliveryRef.get();
+  if (existingDelivery.exists && existingDelivery.get("state") === "sent") {
+    return { delivery: publicAttachmentDelivery(existingDelivery.data()!), writeEnabled: true as const };
+  }
+
+  const preview = await freeAgentAttachmentPreviewsRef(ownerUid).doc(receiptId).get();
+  const expiresAt = preview.get("expiresAt") as Timestamp | undefined;
+  if (!preview.exists || preview.get("ownerUid") !== ownerUid || preview.get("tokenHash") !== hash(confirmationToken)
+    || !expiresAt || expiresAt.toMillis() <= Date.now()) {
+    throw new HttpsError("failed-precondition", "The confirmation preview has expired. Refresh it before sending.");
+  }
+
+  let claimed = false;
+  try {
+    const context = await receiptAttachmentContext(ownerUid, receiptId);
+    const target = await liveAttachmentTarget(ownerUid, context.transactionUrl);
+    const fileName = attachmentFileName(receiptId);
+    const eligibility = evaluateAttachmentEligibility({
+      transaction: target.transaction,
+      explanation: target.explanation,
+      assetSize: context.processedSize,
+      expectedFileName: fileName,
+    });
+    if (!eligibility.eligible || !target.explanation) {
+      throw new HttpsError("failed-precondition", eligibility.blockers[0] ?? "The FreeAgent explanation is no longer safe to update.");
+    }
+    if (preview.get("fingerprint") !== attachmentTargetFingerprint(context, target)) {
+      throw new HttpsError("failed-precondition", "The FreeAgent explanation changed after preview. Review it again before sending.");
+    }
+
+    const claimResult = await claimAttachmentDelivery(deliveryRef, ownerUid, receiptId, preview.get("fingerprint"));
+    if (claimResult === "sent") {
+      const saved = await deliveryRef.get();
+      return { delivery: publicAttachmentDelivery(saved.data()!), writeEnabled: true as const };
+    }
+    claimed = true;
+
+    const expectedPath = `receipts/${ownerUid}/${receiptId}/processed-v1.jpg`;
+    if (context.processedStoragePath !== expectedPath) throw new HttpsError("failed-precondition", "The processed receipt path is invalid.");
+    const [image] = await getStorage().bucket().file(expectedPath).download();
+    if (!image.length || image.length > FREEAGENT_ATTACHMENT_MAX_BYTES || image.length !== context.processedSize) {
+      throw new HttpsError("failed-precondition", "The processed receipt no longer matches the confirmed preview.");
+    }
+
+    let updatedExplanation = target.explanation;
+    if (!eligibility.reconcileExisting) {
+      updatedExplanation = await withFreeAgentAccessToken(ownerUid, (accessToken) => updateFreeAgentExplanationAttachment({
+        accessToken,
+        explanationUrl: target.explanation!.url,
+        attachment: {
+          data: image.toString("base64"),
+          fileName,
+          description: `Receipt for ${context.merchantName}`.slice(0, 255),
+          contentType: "image/jpeg",
+        },
+      }));
+    }
+    const verifiedExplanation = await withFreeAgentAccessToken(ownerUid, (accessToken) => fetchFreeAgentBankTransactionExplanation({
+      accessToken,
+      explanationUrl: updatedExplanation.url,
+      fallback: target.explanation!,
+    }));
+    if (!verifiedExplanation.attachment || verifiedExplanation.attachment.fileName !== fileName) {
+      throw new HttpsError("unavailable", "FreeAgent did not confirm the receipt attachment. It is safe to try again.");
+    }
+
+    await deliveryRef.set({
+      ownerUid,
+      receiptId,
+      state: "sent",
+      operation: "attach_to_existing_explanation",
+      stage: "8A",
+      proposal: {
+        transactionId: context.transactionId,
+        transactionUrl: context.transactionUrl,
+      },
+      target: {
+        transactionUrl: target.transaction.url,
+        explanationUrl: verifiedExplanation.url,
+        explanationType: verifiedExplanation.type,
+        categoryUrl: verifiedExplanation.categoryUrl,
+        datedOn: verifiedExplanation.datedOn,
+        grossValue: verifiedExplanation.grossValue,
+      },
+      attachment: {
+        id: verifiedExplanation.attachment.id,
+        url: verifiedExplanation.attachment.url,
+        fileName: verifiedExplanation.attachment.fileName,
+        fileSize: verifiedExplanation.attachment.fileSize,
+        contentType: verifiedExplanation.attachment.contentType,
+        sourceStoragePath: context.processedStoragePath,
+        sourceSha256: hash(image),
+      },
+      confirmedBy: ownerUid,
+      confirmedAt: FieldValue.serverTimestamp(),
+      sentAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+      lastErrorCode: FieldValue.delete(),
+    }, { merge: true });
+    await getFirestore().collection("receipts").doc(receiptId).set({
+      delivery: {
+        state: "sent",
+        resourceType: "bank_transaction_explanation",
+        label: `Attached to ${context.transactionDescription || "FreeAgent transaction"}`.slice(0, 160),
+        sentAt: FieldValue.serverTimestamp(),
+      },
+    }, { merge: true });
+    await freeAgentAttachmentPreviewsRef(ownerUid).doc(receiptId).delete().catch(() => undefined);
+    const saved = await deliveryRef.get();
+    return { delivery: publicAttachmentDelivery(saved.data()!), writeEnabled: true as const };
+  } catch (cause) {
+    if (claimed) {
+      await deliveryRef.set({
+        state: "failed",
+        lastErrorCode: attachmentDeliveryErrorCode(cause),
+        failedAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true }).catch(() => undefined);
+    }
+    if (cause instanceof HttpsError) throw cause;
+    throw freeAgentCallableError(cause, "The receipt could not be attached to FreeAgent. It is safe to try again.");
+  }
+});
+
 export const disconnectFreeAgent = onCall({
   region: "europe-west1",
   timeoutSeconds: 30,
@@ -752,6 +951,236 @@ function freeAgentTransactionsRef(ownerUid: string) {
 
 function freeAgentMatchProposalsRef(ownerUid: string) {
   return freeAgentSyncRef(ownerUid).collection("matchProposals");
+}
+
+function freeAgentAttachmentPreviewsRef(ownerUid: string) {
+  return freeAgentSyncRef(ownerUid).collection("attachmentPreviews");
+}
+
+function freeAgentDeliveriesRef(ownerUid: string) {
+  return getFirestore().collection("freeAgentDeliveryAudits").doc(ownerUid).collection("receipts");
+}
+
+type ReceiptAttachmentContext = {
+  receiptId: string;
+  merchantName: string;
+  processedStoragePath: string;
+  processedSize: number;
+  transactionId: string;
+  transactionUrl: string;
+  transactionDescription: string;
+  bankAccountName: string;
+};
+
+type LiveAttachmentTarget = {
+  transaction: FreeAgentBankTransaction;
+  explanation: FreeAgentBankTransactionExplanation | null;
+};
+
+async function receiptAttachmentContext(ownerUid: string, receiptId: string): Promise<ReceiptAttachmentContext> {
+  const [receipt, proposal] = await Promise.all([
+    verifiedReceiptForMatching(ownerUid, receiptId),
+    freeAgentMatchProposalsRef(ownerUid).doc(receiptId).get(),
+  ]);
+  if (!proposal.exists || proposal.get("state") !== "proposed" || proposal.get("type") !== "transaction") {
+    throw new HttpsError("failed-precondition", "Save a bank transaction match before attaching this receipt.");
+  }
+  const transaction = proposal.get("transaction") as Record<string, unknown> | undefined;
+  const processedStoragePath = String(receipt.data.processedStoragePath ?? "");
+  const processedSize = Number(receipt.data.processedSize ?? 0);
+  const transactionId = typeof transaction?.id === "string" ? transaction.id : "";
+  const transactionUrl = typeof transaction?.url === "string" ? transaction.url : "";
+  if (!processedStoragePath || !Number.isSafeInteger(processedSize) || processedSize <= 0
+    || !transactionId || !transactionUrl) {
+    throw new HttpsError("failed-precondition", "The verified receipt or saved transaction match is incomplete.");
+  }
+  return {
+    receiptId,
+    merchantName: receipt.verified.merchantName,
+    processedStoragePath,
+    processedSize,
+    transactionId,
+    transactionUrl,
+    transactionDescription: String(transaction?.description || transaction?.fullDescription || "Bank transaction"),
+    bankAccountName: String(transaction?.bankAccountName || "FreeAgent account"),
+  };
+}
+
+async function liveAttachmentTarget(ownerUid: string, transactionUrl: string): Promise<LiveAttachmentTarget> {
+  return withFreeAgentAccessToken(ownerUid, async (accessToken) => {
+    const transaction = await fetchFreeAgentBankTransaction({ accessToken, transactionUrl });
+    const explanationSummary = transaction.explanations.length === 1 ? transaction.explanations[0] : null;
+    const explanation = explanationSummary
+      ? await fetchFreeAgentBankTransactionExplanation({
+        accessToken,
+        explanationUrl: explanationSummary.url,
+        fallback: explanationSummary,
+      })
+      : null;
+    return { transaction, explanation };
+  });
+}
+
+function attachmentTargetFingerprint(context: ReceiptAttachmentContext, target: LiveAttachmentTarget): string {
+  const explanation = target.explanation;
+  return hash(JSON.stringify({
+    receipt: {
+      id: context.receiptId,
+      processedStoragePath: context.processedStoragePath,
+      processedSize: context.processedSize,
+    },
+    proposal: {
+      transactionId: context.transactionId,
+      transactionUrl: context.transactionUrl,
+    },
+    transaction: {
+      url: target.transaction.url,
+      datedOn: target.transaction.datedOn,
+      amount: target.transaction.amount,
+      unexplainedAmount: target.transaction.unexplainedAmount,
+      updatedAt: target.transaction.updatedAt,
+      explanationUrls: target.transaction.explanations.map((candidate) => candidate.url),
+    },
+    explanation: explanation ? {
+      url: explanation.url,
+      bankTransactionUrl: explanation.bankTransactionUrl,
+      type: explanation.type,
+      categoryUrl: explanation.categoryUrl,
+      datedOn: explanation.datedOn,
+      grossValue: explanation.grossValue,
+      updatedAt: explanation.updatedAt,
+      isLocked: explanation.isLocked,
+      attachment: explanation.attachment ? {
+        url: explanation.attachment.url,
+        fileName: explanation.attachment.fileName,
+        fileSize: explanation.attachment.fileSize,
+      } : null,
+    } : null,
+  }));
+}
+
+function publicAttachmentPreview(
+  context: ReceiptAttachmentContext,
+  target: LiveAttachmentTarget,
+  eligibility: ReturnType<typeof evaluateAttachmentEligibility>,
+  confirmationToken: string | null,
+) {
+  const explanation = target.explanation;
+  return {
+    state: eligibility.eligible ? "ready" as const : "blocked" as const,
+    receipt: {
+      id: context.receiptId,
+      merchantName: context.merchantName,
+      processedSize: context.processedSize,
+    },
+    transaction: {
+      id: target.transaction.id,
+      description: target.transaction.description,
+      datedOn: target.transaction.datedOn,
+      amount: target.transaction.amount,
+      bankAccountName: context.bankAccountName,
+    },
+    explanation: explanation ? {
+      id: explanation.id,
+      type: explanation.type,
+      description: explanation.description,
+      categoryUrl: explanation.categoryUrl,
+      categoryNominalCode: freeAgentCategoryNominalCode(explanation.categoryUrl),
+      datedOn: explanation.datedOn,
+      grossValue: explanation.grossValue,
+      isLocked: explanation.isLocked,
+      existingAttachment: explanation.attachment ? {
+        fileName: explanation.attachment.fileName,
+        fileSize: explanation.attachment.fileSize,
+      } : null,
+    } : null,
+    attachment: {
+      fileName: attachmentFileName(context.receiptId),
+      fileSize: context.processedSize,
+      contentType: "image/jpeg" as const,
+    },
+    blockers: eligibility.blockers,
+    reconcileExisting: eligibility.reconcileExisting,
+    confirmationToken,
+    writeEnabled: true as const,
+  };
+}
+
+function publicAttachmentDelivery(data: Record<string, unknown>) {
+  const target = data.target as Record<string, unknown> | undefined;
+  const attachment = data.attachment as Record<string, unknown> | undefined;
+  return {
+    state: data.state === "sent" ? "sent" as const : "failed" as const,
+    operation: "attach_to_existing_explanation" as const,
+    target: {
+      transactionUrl: String(target?.transactionUrl ?? ""),
+      explanationUrl: String(target?.explanationUrl ?? ""),
+      explanationType: String(target?.explanationType ?? "Existing explanation"),
+      categoryUrl: typeof target?.categoryUrl === "string" ? target.categoryUrl : null,
+      categoryNominalCode: freeAgentCategoryNominalCode(target?.categoryUrl),
+      datedOn: String(target?.datedOn ?? ""),
+      grossValue: String(target?.grossValue ?? ""),
+    },
+    attachment: {
+      fileName: String(attachment?.fileName ?? ""),
+      fileSize: Number(attachment?.fileSize ?? 0),
+      contentType: String(attachment?.contentType ?? "image/jpeg"),
+    },
+    sentAt: firestoreDate(data.sentAt),
+  };
+}
+
+function freeAgentCategoryNominalCode(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    return url.origin === "https://api.freeagent.com" && /^\/v2\/categories\/[A-Za-z0-9_-]{1,40}$/.test(url.pathname)
+      ? url.pathname.split("/").at(-1) ?? null
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function claimAttachmentDelivery(
+  reference: DocumentReference,
+  ownerUid: string,
+  receiptId: string,
+  fingerprint: unknown,
+): Promise<"claimed" | "sent"> {
+  if (typeof fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(fingerprint)) {
+    throw new HttpsError("failed-precondition", "Refresh the attachment preview before sending.");
+  }
+  return getFirestore().runTransaction(async (transaction) => {
+    const current = await transaction.get(reference);
+    if (current.exists && current.get("state") === "sent") return "sent" as const;
+    const updatedAt = current.get("updatedAt") as Timestamp | undefined;
+    if (current.exists && current.get("state") === "sending" && updatedAt
+      && Date.now() - updatedAt.toMillis() < ATTACHMENT_DELIVERY_STALE_MS) {
+      throw new HttpsError("aborted", "This receipt is already being sent to FreeAgent.");
+    }
+    transaction.set(reference, {
+      ownerUid,
+      receiptId,
+      state: "sending",
+      operation: "attach_to_existing_explanation",
+      stage: "8A",
+      previewFingerprint: fingerprint,
+      attemptCount: FieldValue.increment(1),
+      ...(current.exists ? {} : { createdAt: FieldValue.serverTimestamp() }),
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+    return "claimed" as const;
+  });
+}
+
+function attachmentDeliveryErrorCode(cause: unknown): string {
+  if (cause instanceof HttpsError) return `delivery_${cause.code.replace(/[^a-z-]/g, "_")}`.slice(0, 80);
+  if (cause instanceof FreeAgentRequestError) return `freeagent_${cause.code}`.slice(0, 80);
+  if (typeof cause === "object" && cause !== null && "code" in cause && typeof cause.code === "string") {
+    return `storage_${cause.code.replace(/[^A-Za-z0-9_-]/g, "_")}`.slice(0, 80);
+  }
+  return "attachment_delivery_failed";
 }
 
 async function storeFreeAgentConnection(
