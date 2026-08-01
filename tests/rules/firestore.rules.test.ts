@@ -299,6 +299,23 @@ describe("Firestore receipt rules", () => {
     await assertFails(getDoc(doc(unclaimedDb, "receipts/receipt-1")));
   });
 
+  it("never exposes FreeAgent tokens or OAuth state to the browser", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "freeAgentConnections/owner-user"), {
+        ownerUid,
+        accessToken: { ciphertext: "encrypted" },
+      });
+      await setDoc(doc(context.firestore(), "freeAgentOAuthStates/state-hash"), {
+        ownerUid,
+        expiresAt: serverTimestamp(),
+      });
+    });
+    const db = testEnv.authenticatedContext(ownerUid, { fidoOwner: true }).firestore();
+
+    await assertFails(getDoc(doc(db, "freeAgentConnections/owner-user")));
+    await assertFails(getDoc(doc(db, "freeAgentOAuthStates/state-hash")));
+  });
+
   it("denies updates and unexpected fields", async () => {
     const db = testEnv.authenticatedContext(ownerUid, { fidoOwner: true }).firestore();
     const receiptRef = doc(db, "receipts/receipt-1");

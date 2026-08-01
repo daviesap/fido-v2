@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { initializeApp } from "firebase-admin/app";
 import { FieldValue, Timestamp, getFirestore, type DocumentReference, type Firestore } from "firebase-admin/firestore";
 import { getFunctions } from "firebase-admin/functions";
@@ -27,16 +27,33 @@ import {
   type EmailConfig,
   type IngestPayload,
 } from "./protocol.js";
+import {
+  FREEAGENT_APP_ORIGIN,
+  FreeAgentRequestError,
+  buildFreeAgentAuthorizationUrl,
+  decryptSecret,
+  encryptSecret,
+  exchangeFreeAgentCode,
+  fetchFreeAgentIdentity,
+  refreshFreeAgentTokens,
+  type EncryptedSecret,
+  type FreeAgentIdentity,
+  type FreeAgentTokens,
+} from "./freeagent.js";
 
 initializeApp();
 
 const ingestSharedSecret = defineSecret("FIDO_INGEST_SHARED_SECRET");
 const emailConfig = defineJsonSecret<EmailConfig>("FIDO_EMAIL_CONFIG");
 const openaiApiKey = defineSecret("OPENAI_API_KEY");
+const freeAgentClientId = defineSecret("FIDO_V2_FREEAGENT_CLIENT_ID");
+const freeAgentClientSecret = defineSecret("FIDO_V2_FREEAGENT_CLIENT_SECRET");
+const freeAgentTokenEncryptionKey = defineSecret("FIDO_V2_FREEAGENT_TOKEN_ENCRYPTION_KEY");
 const receiptModel = defineString("OPENAI_RECEIPT_MODEL", { default: DEFAULT_RECEIPT_MODEL });
 const EXTRACTION_FUNCTION_NAME = "extractReceipt";
 const EXTRACTION_FUNCTION_RESOURCE = `locations/europe-west1/functions/${EXTRACTION_FUNCTION_NAME}`;
 const MAX_EXTRACTION_ATTEMPTS = 3;
+const FREEAGENT_STATE_LIFETIME_MS = 10 * 60 * 1000;
 
 const ExtractionTaskSchema = z.object({
   receiptId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
@@ -239,6 +256,219 @@ export const retryReceiptExtraction = onCall({
   }
   return { queued: true };
 });
+
+export const startFreeAgentOAuth = onCall({
+  region: "europe-west1",
+  secrets: [freeAgentClientId],
+  timeoutSeconds: 30,
+}, async (request) => {
+  const ownerUid = requireOwner(request.auth);
+  const state = randomBytes(32).toString("base64url");
+  const stateRef = getFirestore().collection("freeAgentOAuthStates").doc(hash(state));
+  await stateRef.create({
+    ownerUid,
+    createdAt: FieldValue.serverTimestamp(),
+    expiresAt: Timestamp.fromMillis(Date.now() + FREEAGENT_STATE_LIFETIME_MS),
+  });
+  return { authorizationUrl: buildFreeAgentAuthorizationUrl({ clientId: freeAgentClientId.value(), state }) };
+});
+
+export const freeAgentOAuthCallback = onRequest({
+  region: "europe-west1",
+  invoker: "public",
+  secrets: [freeAgentClientId, freeAgentClientSecret, freeAgentTokenEncryptionKey],
+  timeoutSeconds: 60,
+  maxInstances: 5,
+  cors: false,
+}, async (request, response) => {
+  response.set("cache-control", "no-store");
+  response.set("referrer-policy", "no-referrer");
+  if (request.method !== "GET") {
+    response.status(405).send("GET required");
+    return;
+  }
+  const query = z.object({
+    code: z.string().min(1).max(4096),
+    state: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  }).safeParse({ code: singleQueryValue(request.query.code), state: singleQueryValue(request.query.state) });
+  if (!query.success) {
+    response.redirect(303, freeAgentResultUrl("error", singleQueryValue(request.query.error) || "invalid_callback"));
+    return;
+  }
+
+  const stateRef = getFirestore().collection("freeAgentOAuthStates").doc(hash(query.data.state));
+  try {
+    const ownerUid = await getFirestore().runTransaction(async (transaction) => {
+      const state = await transaction.get(stateRef);
+      const expiresAt = state.get("expiresAt") as Timestamp | undefined;
+      if (!state.exists || state.get("consumedAt") || !expiresAt || expiresAt.toMillis() <= Date.now()) {
+        throw new OAuthCallbackError("invalid_or_expired_state");
+      }
+      const uid = state.get("ownerUid");
+      if (typeof uid !== "string" || !uid) throw new OAuthCallbackError("invalid_state_owner");
+      transaction.update(stateRef, { consumedAt: FieldValue.serverTimestamp() });
+      return uid;
+    });
+
+    const tokens = await exchangeFreeAgentCode({
+      clientId: freeAgentClientId.value(),
+      clientSecret: freeAgentClientSecret.value(),
+      code: query.data.code,
+    });
+    const identity = await fetchFreeAgentIdentity(tokens.access_token);
+    await storeFreeAgentConnection(ownerUid, tokens, identity, true);
+    await stateRef.delete().catch(() => undefined);
+    response.redirect(303, freeAgentResultUrl("connected"));
+  } catch (cause) {
+    const errorCode = freeAgentErrorCode(cause);
+    logger.warn("FreeAgent OAuth callback failed", {
+      errorCode,
+      upstreamStatus: cause instanceof FreeAgentRequestError ? cause.status : undefined,
+    });
+    response.redirect(303, freeAgentResultUrl("error", errorCode));
+  }
+});
+
+export const getFreeAgentConnection = onCall({
+  region: "europe-west1",
+  timeoutSeconds: 30,
+}, async (request) => {
+  const ownerUid = requireOwner(request.auth);
+  const connection = await freeAgentConnectionRef(ownerUid).get();
+  if (!connection.exists || connection.get("status") !== "connected") return { connected: false as const };
+  return publicFreeAgentConnection(connection.data()!);
+});
+
+export const verifyFreeAgentConnection = onCall({
+  region: "europe-west1",
+  secrets: [freeAgentClientId, freeAgentClientSecret, freeAgentTokenEncryptionKey],
+  timeoutSeconds: 60,
+}, async (request) => {
+  const ownerUid = requireOwner(request.auth);
+  let accessToken = await validFreeAgentAccessToken(ownerUid, false);
+  let identity: FreeAgentIdentity;
+  try {
+    identity = await fetchFreeAgentIdentity(accessToken);
+  } catch (cause) {
+    if (!(cause instanceof FreeAgentRequestError) || cause.status !== 401) throw cause;
+    accessToken = await validFreeAgentAccessToken(ownerUid, true);
+    identity = await fetchFreeAgentIdentity(accessToken);
+  }
+  await freeAgentConnectionRef(ownerUid).set({
+    profile: identity.user,
+    company: identity.company,
+    lastVerifiedAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+  const updated = await freeAgentConnectionRef(ownerUid).get();
+  return publicFreeAgentConnection(updated.data()!);
+});
+
+export const disconnectFreeAgent = onCall({
+  region: "europe-west1",
+  timeoutSeconds: 30,
+}, async (request) => {
+  const ownerUid = requireOwner(request.auth);
+  await freeAgentConnectionRef(ownerUid).delete();
+  return { connected: false as const };
+});
+
+function requireOwner(auth: { uid: string; token: Record<string, unknown> } | undefined): string {
+  if (!auth) throw new HttpsError("unauthenticated", "Sign in to manage FreeAgent.");
+  if (auth.token.fidoOwner !== true) throw new HttpsError("permission-denied", "This account is not the Fido owner.");
+  return auth.uid;
+}
+
+function freeAgentConnectionRef(ownerUid: string) {
+  return getFirestore().collection("freeAgentConnections").doc(ownerUid);
+}
+
+async function storeFreeAgentConnection(
+  ownerUid: string,
+  tokens: FreeAgentTokens,
+  identity: FreeAgentIdentity,
+  newlyConnected: boolean,
+): Promise<void> {
+  const now = Date.now();
+  await freeAgentConnectionRef(ownerUid).set({
+    ownerUid,
+    provider: "freeagent",
+    environment: "production",
+    status: "connected",
+    accessToken: encryptSecret(tokens.access_token, freeAgentTokenEncryptionKey.value()),
+    refreshToken: encryptSecret(tokens.refresh_token, freeAgentTokenEncryptionKey.value()),
+    accessTokenExpiresAt: Timestamp.fromMillis(now + tokens.expires_in * 1000),
+    refreshTokenExpiresAt: tokens.refresh_token_expires_in
+      ? Timestamp.fromMillis(now + tokens.refresh_token_expires_in * 1000)
+      : null,
+    profile: identity.user,
+    company: identity.company,
+    ...(newlyConnected ? { connectedAt: FieldValue.serverTimestamp() } : {}),
+    lastVerifiedAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+}
+
+async function validFreeAgentAccessToken(ownerUid: string, forceRefresh: boolean): Promise<string> {
+  const connection = await freeAgentConnectionRef(ownerUid).get();
+  if (!connection.exists || connection.get("status") !== "connected") {
+    throw new HttpsError("failed-precondition", "FreeAgent is not connected.");
+  }
+  const expiresAt = connection.get("accessTokenExpiresAt") as Timestamp | undefined;
+  const encryptedAccessToken = connection.get("accessToken") as EncryptedSecret | undefined;
+  if (!forceRefresh && expiresAt && expiresAt.toMillis() > Date.now() + 60_000 && encryptedAccessToken) {
+    return decryptSecret(encryptedAccessToken, freeAgentTokenEncryptionKey.value());
+  }
+
+  const encryptedRefreshToken = connection.get("refreshToken") as EncryptedSecret | undefined;
+  if (!encryptedRefreshToken) throw new HttpsError("failed-precondition", "Reconnect FreeAgent to continue.");
+  const tokens = await refreshFreeAgentTokens({
+    clientId: freeAgentClientId.value(),
+    clientSecret: freeAgentClientSecret.value(),
+    refreshToken: decryptSecret(encryptedRefreshToken, freeAgentTokenEncryptionKey.value()),
+  });
+  await storeFreeAgentConnection(ownerUid, tokens, {
+    user: connection.get("profile") as FreeAgentIdentity["user"],
+    company: connection.get("company") as FreeAgentIdentity["company"],
+  }, false);
+  return tokens.access_token;
+}
+
+function publicFreeAgentConnection(data: Record<string, unknown>) {
+  const connectedAt = data.connectedAt as Timestamp | undefined;
+  const lastVerifiedAt = data.lastVerifiedAt as Timestamp | undefined;
+  return {
+    connected: true as const,
+    environment: "production" as const,
+    profile: data.profile,
+    company: data.company,
+    connectedAt: connectedAt?.toDate().toISOString() ?? null,
+    lastVerifiedAt: lastVerifiedAt?.toDate().toISOString() ?? null,
+  };
+}
+
+function singleQueryValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function freeAgentResultUrl(result: "connected" | "error", error?: string): string {
+  const url = new URL(FREEAGENT_APP_ORIGIN);
+  url.searchParams.set("freeagent", result);
+  if (error) url.searchParams.set("reason", error.slice(0, 80));
+  return url.toString();
+}
+
+function freeAgentErrorCode(cause: unknown): string {
+  if (cause instanceof OAuthCallbackError || cause instanceof FreeAgentRequestError) return cause.code;
+  if (cause instanceof z.ZodError) return "invalid_freeagent_response";
+  return "freeagent_connection_failed";
+}
+
+class OAuthCallbackError extends Error {
+  constructor(public readonly code: string) {
+    super(code);
+  }
+}
 
 async function enqueueExtraction(payload: ExtractionTask): Promise<void> {
   const taskId = hash(`receipt-extraction|${payload.receiptId}|${payload.generation}`);

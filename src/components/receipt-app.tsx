@@ -24,6 +24,7 @@ import {
 import { useAuth } from "@/components/auth-provider";
 import { ReceiptReview } from "@/components/receipt-review";
 import { ReceiptVerification } from "@/components/receipt-verification";
+import { FreeAgentConnectionCard } from "@/components/freeagent-connection";
 import { db, functions, storage } from "@/lib/firebase";
 import { PROCESSING_VERSION, type ProcessedReceiptImage } from "@/lib/image-processing";
 import {
@@ -281,6 +282,8 @@ export function ReceiptApp() {
           <h1>Receipts ready when you are.</h1>
           <p>Photograph, upload, or email a receipt. Fido keeps capture quick, extracts the useful totals in the background, and leaves a short verification queue for later.</p>
         </section>
+
+        <FreeAgentConnectionCard />
 
         <section className="email-receipt-card">
           <div>
