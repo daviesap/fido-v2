@@ -190,8 +190,8 @@ img { display: block; max-width: 100%; }
   .review-result { overflow: auto; }
   .review-actions { position: sticky; bottom: 0; padding: 12px 16px max(12px, env(safe-area-inset-bottom)); background: var(--surface); }
   .review-actions button { flex: 1; }
-  .verification-backdrop { display: block; padding: 0; background: var(--surface); }
-  .verification-dialog { width: 100%; max-height: none; min-height: 100vh; border-radius: 0; box-shadow: none; }
+  .verification-backdrop { display: block; height: 100dvh; padding: 0; overflow-y: auto; overscroll-behavior-y: contain; background: var(--surface); -webkit-overflow-scrolling: touch; }
+  .verification-dialog { width: 100%; max-height: none; min-height: 100dvh; overflow: visible; border-radius: 0; box-shadow: none; }
   .verification-workspace { grid-template-columns: 1fr; overflow: visible; }
   .verification-image { min-height: 360px; max-height: 52vh; padding: 14px; }
   .verification-form { padding: 24px; overflow: visible; border-top: 1px solid var(--line); border-left: 0; }

@@ -1,7 +1,12 @@
 import OpenAI from "openai";
 import { describe, expect, it } from "vitest";
 
-import { ReceiptExtractionResultSchema, addTotalWarning, extractReceiptValues } from "./extraction.js";
+import {
+  ReceiptExtractionResultSchema,
+  addTotalWarning,
+  applyReceiptTaxPolicy,
+  extractReceiptValues,
+} from "./extraction.js";
 
 const extraction = {
   merchantName: "Corner Shop",
@@ -35,6 +40,20 @@ describe("receipt extraction validation", () => {
       vatTotal: null,
       confidence: { ...extraction.confidence, netTotal: "not_present", vatTotal: "not_present" },
     })).toBeTruthy();
+  });
+
+  it("removes net and VAT values returned for non-GBP receipts", () => {
+    expect(applyReceiptTaxPolicy({ ...extraction, currency: "USD" })).toEqual({
+      ...extraction,
+      currency: "USD",
+      netTotal: null,
+      vatTotal: null,
+      confidence: {
+        ...extraction.confidence,
+        netTotal: "not_present",
+        vatTotal: "not_present",
+      },
+    });
   });
 
   it("rejects floating numbers and non-ISO currencies", () => {

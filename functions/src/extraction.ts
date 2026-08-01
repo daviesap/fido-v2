@@ -162,12 +162,26 @@ export async function extractReceiptValues(input: {
   if (!parsed.success) throw new ExtractionResponseError("invalid_schema");
 
   return {
-    result: addTotalWarning(parsed.data),
+    result: addTotalWarning(applyReceiptTaxPolicy(parsed.data)),
     model: response.model,
     usage: {
       inputTokens: response.usage?.input_tokens ?? 0,
       outputTokens: response.usage?.output_tokens ?? 0,
       totalTokens: response.usage?.total_tokens ?? 0,
+    },
+  };
+}
+
+export function applyReceiptTaxPolicy(result: ReceiptExtractionResult): ReceiptExtractionResult {
+  if (result.currency === null || result.currency === "GBP") return result;
+  return {
+    ...result,
+    netTotal: null,
+    vatTotal: null,
+    confidence: {
+      ...result.confidence,
+      netTotal: "not_present",
+      vatTotal: "not_present",
     },
   };
 }
