@@ -1,10 +1,21 @@
 import { createHash } from "node:crypto";
 import { initializeApp } from "firebase-admin/app";
-import { FieldValue, Timestamp, getFirestore, type Firestore } from "firebase-admin/firestore";
+import { FieldValue, Timestamp, getFirestore, type DocumentReference, type Firestore } from "firebase-admin/firestore";
+import { getFunctions } from "firebase-admin/functions";
 import { getStorage } from "firebase-admin/storage";
-import { defineJsonSecret, defineSecret } from "firebase-functions/params";
-import { onRequest } from "firebase-functions/v2/https";
+import { defineJsonSecret, defineSecret, defineString } from "firebase-functions/params";
+import { onDocumentWritten } from "firebase-functions/v2/firestore";
+import { HttpsError, onCall, onRequest } from "firebase-functions/v2/https";
+import { onTaskDispatched } from "firebase-functions/v2/tasks";
 import { logger } from "firebase-functions";
+import OpenAI from "openai";
+import { z } from "zod";
+import {
+  DEFAULT_RECEIPT_MODEL,
+  EXTRACTION_PROMPT_VERSION,
+  EXTRACTION_SCHEMA_VERSION,
+  extractReceiptValues,
+} from "./extraction.js";
 import {
   EmailConfigSchema,
   IngestPayloadSchema,
@@ -21,6 +32,271 @@ initializeApp();
 
 const ingestSharedSecret = defineSecret("FIDO_INGEST_SHARED_SECRET");
 const emailConfig = defineJsonSecret<EmailConfig>("FIDO_EMAIL_CONFIG");
+const openaiApiKey = defineSecret("OPENAI_API_KEY");
+const receiptModel = defineString("OPENAI_RECEIPT_MODEL", { default: DEFAULT_RECEIPT_MODEL });
+const EXTRACTION_FUNCTION_NAME = "extractReceipt";
+const EXTRACTION_FUNCTION_RESOURCE = `locations/europe-west1/functions/${EXTRACTION_FUNCTION_NAME}`;
+const MAX_EXTRACTION_ATTEMPTS = 3;
+
+const ExtractionTaskSchema = z.object({
+  receiptId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+  generation: z.number().int().positive().max(100),
+}).strict();
+
+type ExtractionTask = z.infer<typeof ExtractionTaskSchema>;
+
+export const queueReceiptExtraction = onDocumentWritten({
+  document: "receipts/{receiptId}",
+  region: "europe-west1",
+  retry: true,
+  maxInstances: 5,
+}, async (event) => {
+  const snapshot = event.data?.after;
+  if (!snapshot?.exists) return;
+  const receipt = snapshot.data();
+  if (!receipt || receipt.status !== "ready_for_extraction" || receipt.extraction) return;
+
+  const payload: ExtractionTask = { receiptId: event.params.receiptId, generation: 1 };
+  const queued = await getFirestore().runTransaction(async (transaction) => {
+    const current = await transaction.get(snapshot.ref);
+    if (!current.exists || current.get("status") !== "ready_for_extraction") return false;
+    const currentExtraction = current.get("extraction") as { state?: string; generation?: number; errorCode?: string } | undefined;
+    const queueCanBeRetried = currentExtraction?.generation === payload.generation
+      && (currentExtraction.state === "queued"
+        || (currentExtraction.state === "failed" && currentExtraction.errorCode === "queue_unavailable"));
+    if (currentExtraction && !queueCanBeRetried) return false;
+    transaction.set(snapshot.ref, {
+      extraction: {
+        state: "queued",
+        generation: payload.generation,
+        attemptCount: 0,
+        queuedAt: FieldValue.serverTimestamp(),
+      },
+    }, { merge: true });
+    return true;
+  });
+  if (!queued) return;
+
+  try {
+    await enqueueExtraction(payload);
+  } catch (cause) {
+    if (isTaskAlreadyExists(cause)) return;
+    await updateExtractionIfCurrent(snapshot.ref, payload.generation, {
+      state: "failed",
+      generation: payload.generation,
+      attemptCount: 0,
+      errorCode: "queue_unavailable",
+      failedAt: FieldValue.serverTimestamp(),
+    });
+    throw new Error("receipt_extraction_queue_unavailable");
+  }
+});
+
+export const extractReceipt = onTaskDispatched<ExtractionTask>({
+  region: "europe-west1",
+  secrets: [openaiApiKey],
+  timeoutSeconds: 180,
+  memory: "1GiB",
+  maxInstances: 2,
+  concurrency: 1,
+  retryConfig: {
+    maxAttempts: MAX_EXTRACTION_ATTEMPTS,
+    minBackoffSeconds: 30,
+    maxBackoffSeconds: 300,
+    maxDoublings: 3,
+  },
+  rateLimits: {
+    maxConcurrentDispatches: 2,
+    maxDispatchesPerSecond: 2,
+  },
+}, async (request) => {
+  const payloadResult = ExtractionTaskSchema.safeParse(request.data);
+  if (!payloadResult.success) {
+    logger.warn("Rejected invalid receipt extraction task payload");
+    return;
+  }
+
+  const payload = payloadResult.data;
+  const receiptRef = getFirestore().collection("receipts").doc(payload.receiptId);
+  const claimed = await getFirestore().runTransaction(async (transaction) => {
+    const current = await transaction.get(receiptRef);
+    if (!current.exists || current.get("status") !== "ready_for_extraction") return null;
+    const receipt = current.data()!;
+    const extraction = receipt.extraction as { state?: string; generation?: number; queuedAt?: unknown } | undefined;
+    if (!extraction || extraction.generation !== payload.generation || !["queued", "processing"].includes(extraction.state ?? "")) return null;
+    transaction.set(receiptRef, {
+      extraction: {
+        state: "processing",
+        generation: payload.generation,
+        attemptCount: request.retryCount + 1,
+        queuedAt: extraction.queuedAt ?? FieldValue.serverTimestamp(),
+        startedAt: FieldValue.serverTimestamp(),
+      },
+    }, { merge: true });
+    return { receipt, queuedAt: extraction.queuedAt };
+  });
+  if (!claimed) return;
+  const { receipt, queuedAt } = claimed;
+
+  const startedAt = Date.now();
+  try {
+    const processedStoragePath = receipt.processedStoragePath;
+    const expectedStoragePath = `receipts/${receipt.ownerUid}/${payload.receiptId}/processed-v1.jpg`;
+    if (typeof processedStoragePath !== "string" || processedStoragePath !== expectedStoragePath) {
+      throw new PermanentExtractionError("invalid_processed_asset");
+    }
+    const [image] = await getStorage().bucket().file(processedStoragePath).download();
+    if (!image.length || image.length >= 20 * 1024 * 1024) {
+      throw new PermanentExtractionError("invalid_processed_asset");
+    }
+
+    const extracted = await extractReceiptValues({
+      client: new OpenAI({ apiKey: openaiApiKey.value(), maxRetries: 0, timeout: 120_000 }),
+      image,
+      model: receiptModel.value(),
+    });
+
+    await updateExtractionIfCurrent(receiptRef, payload.generation, {
+      state: "ready_for_verification",
+      generation: payload.generation,
+      attemptCount: request.retryCount + 1,
+      queuedAt: queuedAt ?? Timestamp.fromMillis(startedAt),
+      startedAt: Timestamp.fromMillis(startedAt),
+      completedAt: FieldValue.serverTimestamp(),
+      durationMs: Date.now() - startedAt,
+      schemaVersion: EXTRACTION_SCHEMA_VERSION,
+      promptVersion: EXTRACTION_PROMPT_VERSION,
+      model: extracted.model,
+      usage: extracted.usage,
+      result: extracted.result,
+    });
+  } catch (cause) {
+    const errorCode = extractionErrorCode(cause);
+    const finalAttempt = isPermanentExtractionFailure(cause) || request.retryCount >= MAX_EXTRACTION_ATTEMPTS - 1;
+    await updateExtractionIfCurrent(receiptRef, payload.generation, finalAttempt ? {
+        state: "failed",
+        generation: payload.generation,
+        attemptCount: request.retryCount + 1,
+        queuedAt: queuedAt ?? Timestamp.fromMillis(startedAt),
+        errorCode,
+        failedAt: FieldValue.serverTimestamp(),
+      } : {
+        state: "queued",
+        generation: payload.generation,
+        attemptCount: request.retryCount + 1,
+        queuedAt: queuedAt ?? Timestamp.fromMillis(startedAt),
+        lastErrorCode: errorCode,
+      });
+    if (!finalAttempt) throw new Error(`receipt_extraction_retry:${errorCode}`);
+  }
+});
+
+export const retryReceiptExtraction = onCall({
+  region: "europe-west1",
+  timeoutSeconds: 30,
+}, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Sign in to retry extraction.");
+  if (request.auth.token.fidoOwner !== true) throw new HttpsError("permission-denied", "This account is not the Fido owner.");
+  const parsed = z.object({ receiptId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/) }).strict().safeParse(request.data);
+  if (!parsed.success) throw new HttpsError("invalid-argument", "A valid receipt is required.");
+
+  const receiptRef = getFirestore().collection("receipts").doc(parsed.data.receiptId);
+  const generation = await getFirestore().runTransaction(async (transaction) => {
+    const receipt = await transaction.get(receiptRef);
+    if (!receipt.exists || receipt.get("ownerUid") !== request.auth!.uid) {
+      throw new HttpsError("not-found", "Receipt not found.");
+    }
+    const extraction = receipt.get("extraction") as { state?: string; generation?: number } | undefined;
+    if (receipt.get("status") !== "ready_for_extraction" || (extraction && extraction.state !== "failed")) {
+      throw new HttpsError("failed-precondition", "This receipt is not waiting to be queued.");
+    }
+    const nextGeneration = (extraction?.generation ?? 0) + 1;
+    transaction.set(receiptRef, {
+      extraction: {
+        state: "queued",
+        generation: nextGeneration,
+        attemptCount: 0,
+        queuedAt: FieldValue.serverTimestamp(),
+      },
+    }, { merge: true });
+    return nextGeneration;
+  });
+
+  const payload = { receiptId: parsed.data.receiptId, generation };
+  try {
+    await enqueueExtraction(payload);
+  } catch (cause) {
+    if (!isTaskAlreadyExists(cause)) {
+      await updateExtractionIfCurrent(receiptRef, generation, {
+        state: "failed",
+        generation,
+        attemptCount: 0,
+        errorCode: "queue_unavailable",
+        failedAt: FieldValue.serverTimestamp(),
+      });
+      throw new HttpsError("unavailable", "Extraction could not be queued. Try again shortly.");
+    }
+  }
+  return { queued: true };
+});
+
+async function enqueueExtraction(payload: ExtractionTask): Promise<void> {
+  const taskId = hash(`receipt-extraction|${payload.receiptId}|${payload.generation}`);
+  await getFunctions().taskQueue<ExtractionTask>(EXTRACTION_FUNCTION_RESOURCE).enqueue(payload, {
+    id: taskId,
+    dispatchDeadlineSeconds: 180,
+  });
+}
+
+async function updateExtractionIfCurrent(
+  receiptRef: DocumentReference,
+  generation: number,
+  extraction: Record<string, unknown>,
+): Promise<boolean> {
+  return getFirestore().runTransaction(async (transaction) => {
+    const receipt = await transaction.get(receiptRef);
+    if (!receipt.exists || receipt.get("status") !== "ready_for_extraction") return false;
+    const currentExtraction = receipt.get("extraction") as { generation?: number } | undefined;
+    if (currentExtraction?.generation !== generation) return false;
+    transaction.set(receiptRef, { extraction }, { merge: true });
+    return true;
+  });
+}
+
+function isTaskAlreadyExists(cause: unknown): boolean {
+  return typeof cause === "object" && cause !== null && "code" in cause
+    && (cause as { code: unknown }).code === "functions/task-already-exists";
+}
+
+function extractionErrorCode(cause: unknown): string {
+  if (cause instanceof PermanentExtractionError) return cause.code;
+  if (cause instanceof OpenAI.APIError) {
+    if (cause.status === 401 || cause.status === 403) return "openai_authentication";
+    if (cause.status === 429) return "openai_rate_limit";
+    if (cause.status && cause.status >= 500) return "openai_unavailable";
+    return "openai_request_failed";
+  }
+  if (typeof cause === "object" && cause !== null && "code" in cause && (cause as { code?: unknown }).code === 404) {
+    return "processed_asset_missing";
+  }
+  return "extraction_failed";
+}
+
+function isPermanentExtractionFailure(cause: unknown): boolean {
+  if (cause instanceof PermanentExtractionError) return true;
+  if (cause instanceof OpenAI.APIError) {
+    return cause.status != null && cause.status >= 400 && cause.status < 500
+      && ![408, 409, 429].includes(cause.status);
+  }
+  return typeof cause === "object" && cause !== null && "code" in cause
+    && (cause as { code?: unknown }).code === 404;
+}
+
+class PermanentExtractionError extends Error {
+  constructor(public readonly code: string) {
+    super(code);
+  }
+}
 
 export const receiveReceiptEmail = onRequest({
   region: "europe-west1",
