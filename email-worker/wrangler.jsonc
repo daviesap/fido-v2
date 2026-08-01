@@ -4,6 +4,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-31",
   "observability": { "enabled": true },
+  "browser": { "binding": "BROWSER" },
   "vars": {
     "FIDO_INGEST_ENDPOINT": "https://europe-west1-fido-ceb0e.cloudfunctions.net/receiveReceiptEmail",
     "FIDO_PUBLIC_RECEIPT_ADDRESS": "receipts@flair.london"

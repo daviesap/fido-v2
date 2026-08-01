@@ -2,7 +2,7 @@
 
 Fido lets one permitted Google account photograph, upload, or email a receipt image or PDF, review its crop, and privately store both the untouched original and a processed JPEG. A background Firebase task then extracts merchant, a short purchase description, date, currency, gross total, and explicit UK net/VAT totals with OpenAI. The owner can correct and verify those values later. Foreign receipts also require the real GBP card or bank charge; Fido never estimates exchange rates. A server-side OAuth connection securely accesses the owner's live FreeAgent company, and the owner can select GBP accounts for a private, read-only 90-day transaction view. Receipts paid personally or with cash follow a separate, explicitly confirmed out-of-pocket Expense route.
 
-Receipt attachments can also arrive through `receipts@flair.london`. The Gmail, Cloudflare Email Worker, and Firebase Function setup is documented in [docs/EMAIL_INGESTION.md](docs/EMAIL_INGESTION.md).
+Receipt attachments can also arrive through `receipts@flair.london`. Attachment-free HTML receipts are sanitised and rendered to PDF with scripts, external resources, and tracking content blocked; a plain-text PDF remains the safe fallback. The Gmail, Cloudflare Email Worker, Browser Run, and Firebase Function setup is documented in [docs/EMAIL_INGESTION.md](docs/EMAIL_INGESTION.md).
 
 Background extraction, Firebase secret setup, and production verification are documented in [docs/RECEIPT_EXTRACTION.md](docs/RECEIPT_EXTRACTION.md).
 
