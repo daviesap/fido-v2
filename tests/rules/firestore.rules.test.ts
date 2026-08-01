@@ -318,6 +318,12 @@ describe("Firestore receipt rules", () => {
         amount: "-12.40",
         description: "Private transaction",
       });
+      await setDoc(doc(context.firestore(), "freeAgentSync/owner-user/matchProposals/receipt-1"), {
+        ownerUid,
+        receiptId: "receipt-1",
+        type: "transaction",
+        transaction: { id: "8", amount: "-12.40" },
+      });
     });
     const db = testEnv.authenticatedContext(ownerUid, { fidoOwner: true }).firestore();
 
@@ -325,6 +331,12 @@ describe("Firestore receipt rules", () => {
     await assertFails(getDoc(doc(db, "freeAgentOAuthStates/state-hash")));
     await assertFails(getDoc(doc(db, "freeAgentSync/owner-user")));
     await assertFails(getDoc(doc(db, "freeAgentSync/owner-user/transactions/transaction-hash")));
+    await assertFails(getDoc(doc(db, "freeAgentSync/owner-user/matchProposals/receipt-1")));
+    await assertFails(setDoc(doc(db, "freeAgentSync/owner-user/matchProposals/receipt-2"), {
+      ownerUid,
+      receiptId: "receipt-2",
+      type: "unmatched",
+    }));
   });
 
   it("denies updates and unexpected fields", async () => {

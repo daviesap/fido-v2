@@ -37,13 +37,21 @@ import {
   fetchFreeAgentBankAccounts,
   fetchFreeAgentBankTransactions,
   fetchFreeAgentIdentity,
+  fetchFreeAgentSpendingCategories,
   refreshFreeAgentTokens,
   type EncryptedSecret,
   type FreeAgentBankAccount,
   type FreeAgentBankTransaction,
   type FreeAgentIdentity,
+  type FreeAgentSpendingCategory,
   type FreeAgentTokens,
 } from "./freeagent.js";
+import {
+  buildOutOfPocketExpenseDraft,
+  rankTransactionMatches,
+  type MatchingReceipt,
+  type RankedTransaction,
+} from "./matching.js";
 
 initializeApp();
 
@@ -64,6 +72,40 @@ const FreeAgentAccountSelectionSchema = z.object({
   accountIds: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/)).min(1).max(20),
 }).strict();
 
+const ReceiptMatchRequestSchema = z.object({
+  receiptId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+}).strict();
+
+const FreeAgentCategoryUrlSchema = z.string().url().refine((value) => {
+  const url = new URL(value);
+  return url.origin === "https://api.freeagent.com" && /^\/v2\/categories\/[A-Za-z0-9_-]{1,40}$/.test(url.pathname);
+});
+
+const SaveReceiptMatchProposalSchema = z.discriminatedUnion("type", [
+  ReceiptMatchRequestSchema.extend({
+    type: z.literal("transaction"),
+    transactionId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+  }),
+  ReceiptMatchRequestSchema.extend({
+    type: z.literal("out_of_pocket"),
+    categoryUrl: FreeAgentCategoryUrlSchema,
+  }),
+  ReceiptMatchRequestSchema.extend({
+    type: z.literal("unmatched"),
+  }),
+]);
+
+const StoredVerifiedDataSchema = z.object({
+  merchantName: z.string().min(1).max(160),
+  purchaseDescription: z.string().min(1).max(80).optional(),
+  receiptDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  grossTotal: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+  netTotal: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/).nullable(),
+  vatTotal: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/).nullable(),
+  gbpAmountCharged: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/).nullable().optional(),
+}).strict();
+
 const ExtractionTaskSchema = z.object({
   receiptId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
   generation: z.number().int().positive().max(100),
@@ -78,7 +120,14 @@ export const queueReceiptExtraction = onDocumentWritten({
   maxInstances: 5,
 }, async (event) => {
   const snapshot = event.data?.after;
-  if (!snapshot?.exists) return;
+  if (!snapshot?.exists) {
+    const deleted = event.data?.before;
+    const ownerUid = deleted?.get("ownerUid");
+    if (deleted?.exists && typeof ownerUid === "string") {
+      await freeAgentMatchProposalsRef(ownerUid).doc(event.params.receiptId).delete().catch(() => undefined);
+    }
+    return;
+  }
   const receipt = snapshot.data();
   if (!receipt || receipt.status !== "ready_for_extraction" || receipt.extraction) return;
 
@@ -482,11 +531,156 @@ export const syncFreeAgentTransactions = onCall({
   }
 });
 
+export const getReceiptMatchOptions = onCall({
+  region: "europe-west1",
+  timeoutSeconds: 30,
+}, async (request) => {
+  const ownerUid = requireOwner(request.auth);
+  const parsed = ReceiptMatchRequestSchema.safeParse(request.data);
+  if (!parsed.success) throw new HttpsError("invalid-argument", "A valid receipt is required.");
+  const receipt = await verifiedReceiptForMatching(ownerUid, parsed.data.receiptId);
+  const [transactionSnapshot, proposalSnapshot, syncSnapshot] = await Promise.all([
+    freeAgentTransactionsRef(ownerUid).get(),
+    freeAgentMatchProposalsRef(ownerUid).get(),
+    freeAgentSyncRef(ownerUid).get(),
+  ]);
+  const reservedIds = new Set(proposalSnapshot.docs.flatMap((document) => {
+    if (document.id === parsed.data.receiptId || document.get("type") !== "transaction") return [];
+    const transactionId = document.get("transaction.id");
+    return typeof transactionId === "string" ? [transactionId] : [];
+  }));
+  const transactions = transactionSnapshot.docs
+    .map((document) => publicFreeAgentTransaction(document.data()))
+    .filter((transaction) => !reservedIds.has(transaction.id));
+  const ranked = rankTransactionMatches(receipt.matching, transactions);
+  const existing = proposalSnapshot.docs.find((document) => document.id === parsed.data.receiptId);
+  const lastSyncCompletedAt = syncSnapshot.get("lastSyncCompletedAt") as Timestamp | undefined;
+  return {
+    receipt: publicMatchingReceipt(parsed.data.receiptId, receipt),
+    suggestions: ranked.suggestions.map(publicRankedTransaction),
+    otherTransactions: ranked.otherTransactions.map(publicRankedTransaction),
+    existingProposal: existing ? publicMatchProposal(existing.data()) : null,
+    lastSyncCompletedAt: lastSyncCompletedAt?.toDate().toISOString() ?? null,
+    writeEnabled: false as const,
+  };
+});
+
+export const getFreeAgentSpendingCategories = onCall({
+  region: "europe-west1",
+  secrets: [freeAgentClientId, freeAgentClientSecret, freeAgentTokenEncryptionKey],
+  timeoutSeconds: 60,
+}, async (request) => {
+  const ownerUid = requireOwner(request.auth);
+  try {
+    const categories = await withFreeAgentAccessToken(ownerUid, (accessToken) => fetchFreeAgentSpendingCategories(accessToken));
+    return { categories, writeEnabled: false as const };
+  } catch (cause) {
+    throw freeAgentCallableError(cause, "FreeAgent spending categories could not be loaded.");
+  }
+});
+
+export const saveReceiptMatchProposal = onCall({
+  region: "europe-west1",
+  secrets: [freeAgentClientId, freeAgentClientSecret, freeAgentTokenEncryptionKey],
+  timeoutSeconds: 60,
+}, async (request) => {
+  const ownerUid = requireOwner(request.auth);
+  const parsed = SaveReceiptMatchProposalSchema.safeParse(request.data);
+  if (!parsed.success) throw new HttpsError("invalid-argument", "Choose a valid matching option.");
+  const selection = parsed.data;
+  const receipt = await verifiedReceiptForMatching(ownerUid, selection.receiptId);
+  const proposalRef = freeAgentMatchProposalsRef(ownerUid).doc(selection.receiptId);
+  const existing = await proposalRef.get();
+  const common = {
+    ownerUid,
+    receiptId: selection.receiptId,
+    state: "proposed",
+    stage: 7,
+    receipt: proposalReceiptSnapshot(selection.receiptId, receipt),
+    createdAt: existing.exists ? existing.get("createdAt") : FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  };
+
+  let proposal: Record<string, unknown>;
+  if (selection.type === "transaction") {
+    const [transactions, otherProposals] = await Promise.all([
+      freeAgentTransactionsRef(ownerUid).get(),
+      freeAgentMatchProposalsRef(ownerUid).get(),
+    ]);
+    const alreadyProposed = otherProposals.docs.some((document) => document.id !== selection.receiptId
+      && document.get("type") === "transaction"
+      && document.get("transaction.id") === selection.transactionId);
+    if (alreadyProposed) throw new HttpsError("already-exists", "That transaction is already proposed for another receipt.");
+    const source = transactions.docs
+      .map((document) => publicFreeAgentTransaction(document.data()))
+      .find((transaction) => transaction.id === selection.transactionId);
+    if (!source) throw new HttpsError("not-found", "That transaction is no longer in the synchronised window.");
+    const ranked = rankTransactionMatches(receipt.matching, [source]);
+    const transaction = [...ranked.suggestions, ...ranked.otherTransactions][0];
+    if (!transaction) throw new HttpsError("failed-precondition", "Only purchase transactions can be matched to a receipt.");
+    proposal = { ...common, type: "transaction", transaction: storedTransactionProposal(transaction, source) };
+  } else if (selection.type === "out_of_pocket") {
+    let categories: FreeAgentSpendingCategory[];
+    try {
+      categories = await withFreeAgentAccessToken(ownerUid, (accessToken) => fetchFreeAgentSpendingCategories(accessToken));
+    } catch (cause) {
+      throw freeAgentCallableError(cause, "FreeAgent spending categories could not be checked.");
+    }
+    const category = categories.find((candidate) => candidate.url === selection.categoryUrl);
+    if (!category) throw new HttpsError("invalid-argument", "Choose a current FreeAgent spending category.");
+    const connection = await freeAgentConnectionRef(ownerUid).get();
+    const profile = connection.get("profile") as Record<string, unknown> | undefined;
+    const claimantUrl = profile?.url;
+    if (typeof claimantUrl !== "string") throw new HttpsError("failed-precondition", "Reconnect FreeAgent to prepare an expense.");
+    proposal = {
+      ...common,
+      type: "out_of_pocket",
+      expense: buildOutOfPocketExpenseDraft({
+        receipt: {
+          merchantName: receipt.verified.merchantName,
+          purchaseDescription: receipt.verified.purchaseDescription ?? receipt.verified.merchantName,
+          receiptDate: receipt.verified.receiptDate,
+          currency: receipt.verified.currency,
+          grossTotal: receipt.verified.grossTotal,
+          gbpAmountCharged: receipt.verified.gbpAmountCharged ?? null,
+          vatTotal: receipt.verified.vatTotal,
+        },
+        claimantUrl,
+        claimantName: [profile?.firstName, profile?.lastName].filter((value) => typeof value === "string").join(" ") || "FreeAgent user",
+        category,
+        attachmentName: `receipt-${selection.receiptId}.jpg`,
+      }),
+    };
+  } else {
+    proposal = { ...common, type: "unmatched" };
+  }
+
+  await proposalRef.set(proposal);
+  await getFirestore().collection("receipts").doc(selection.receiptId).set({
+    matching: {
+      state: "proposed",
+      type: selection.type,
+      label: matchProposalLabel(proposal),
+      updatedAt: FieldValue.serverTimestamp(),
+    },
+  }, { merge: true });
+  const saved = await proposalRef.get();
+  return { proposal: publicMatchProposal(saved.data()!), writeEnabled: false as const };
+});
+
 export const disconnectFreeAgent = onCall({
   region: "europe-west1",
   timeoutSeconds: 30,
 }, async (request) => {
   const ownerUid = requireOwner(request.auth);
+  const proposals = await freeAgentMatchProposalsRef(ownerUid).get();
+  for (let offset = 0; offset < proposals.size; offset += 400) {
+    const batch = getFirestore().batch();
+    for (const proposal of proposals.docs.slice(offset, offset + 400)) {
+      batch.set(getFirestore().collection("receipts").doc(proposal.id), { matching: FieldValue.delete() }, { merge: true });
+    }
+    await batch.commit();
+  }
   await getFirestore().recursiveDelete(freeAgentSyncRef(ownerUid));
   await freeAgentConnectionRef(ownerUid).delete();
   return { connected: false as const };
@@ -508,6 +702,10 @@ function freeAgentSyncRef(ownerUid: string) {
 
 function freeAgentTransactionsRef(ownerUid: string) {
   return freeAgentSyncRef(ownerUid).collection("transactions");
+}
+
+function freeAgentMatchProposalsRef(ownerUid: string) {
+  return freeAgentSyncRef(ownerUid).collection("matchProposals");
 }
 
 async function storeFreeAgentConnection(
@@ -622,6 +820,152 @@ function publicFreeAgentTransaction(data: Record<string, unknown>) {
     transactionId: typeof data.transactionId === "string" ? data.transactionId : null,
     updatedAt: String(data.updatedAt ?? ""),
   };
+}
+
+type VerifiedReceiptForMatching = {
+  data: Record<string, unknown>;
+  verified: z.infer<typeof StoredVerifiedDataSchema>;
+  matching: MatchingReceipt;
+};
+
+async function verifiedReceiptForMatching(ownerUid: string, receiptId: string): Promise<VerifiedReceiptForMatching> {
+  const snapshot = await getFirestore().collection("receipts").doc(receiptId).get();
+  if (!snapshot.exists || snapshot.get("ownerUid") !== ownerUid) throw new HttpsError("not-found", "Receipt not found.");
+  if (snapshot.get("status") !== "verified") throw new HttpsError("failed-precondition", "Verify the receipt values before matching.");
+  const verified = StoredVerifiedDataSchema.safeParse(snapshot.get("verifiedData"));
+  if (!verified.success) throw new HttpsError("failed-precondition", "The verified receipt values are incomplete.");
+  return {
+    data: snapshot.data()!,
+    verified: verified.data,
+    matching: {
+      merchantName: verified.data.merchantName,
+      receiptDate: verified.data.receiptDate,
+      currency: verified.data.currency,
+      grossTotal: verified.data.grossTotal,
+      gbpAmountCharged: verified.data.gbpAmountCharged ?? null,
+    },
+  };
+}
+
+function publicMatchingReceipt(receiptId: string, receipt: VerifiedReceiptForMatching) {
+  return {
+    id: receiptId,
+    merchantName: receipt.verified.merchantName,
+    purchaseDescription: receipt.verified.purchaseDescription ?? receipt.verified.merchantName,
+    receiptDate: receipt.verified.receiptDate,
+    currency: receipt.verified.currency,
+    grossTotal: receipt.verified.grossTotal,
+    netTotal: receipt.verified.netTotal,
+    vatTotal: receipt.verified.vatTotal,
+    gbpAmountCharged: receipt.verified.gbpAmountCharged ?? null,
+  };
+}
+
+function proposalReceiptSnapshot(receiptId: string, receipt: VerifiedReceiptForMatching) {
+  return {
+    ...publicMatchingReceipt(receiptId, receipt),
+    processedStoragePath: String(receipt.data.processedStoragePath ?? ""),
+    processedSize: Number(receipt.data.processedSize ?? 0),
+  };
+}
+
+function publicRankedTransaction(transaction: RankedTransaction) {
+  return {
+    id: transaction.id,
+    bankAccountId: transaction.bankAccountId,
+    bankAccountName: transaction.bankAccountName,
+    currency: "GBP" as const,
+    datedOn: transaction.datedOn,
+    amount: transaction.amount,
+    description: transaction.description,
+    fullDescription: transaction.fullDescription,
+    unexplainedAmount: transaction.unexplainedAmount,
+    score: transaction.score,
+    confidence: transaction.confidence,
+    dayDifference: transaction.dayDifference,
+    merchantSimilarity: transaction.merchantSimilarity,
+    factors: transaction.factors,
+    reasons: transaction.reasons,
+  };
+}
+
+function storedTransactionProposal(transaction: RankedTransaction, source: ReturnType<typeof publicFreeAgentTransaction>) {
+  return {
+    ...publicRankedTransaction(transaction),
+    url: source.url,
+    bankAccountUrl: source.bankAccountUrl,
+    transactionId: source.transactionId,
+    sourceUpdatedAt: source.updatedAt,
+  };
+}
+
+function publicMatchProposal(data: Record<string, unknown>) {
+  const type = data.type;
+  const base = {
+    type,
+    state: "proposed" as const,
+    receipt: data.receipt,
+    createdAt: firestoreDate(data.createdAt),
+    updatedAt: firestoreDate(data.updatedAt),
+  };
+  if (type === "transaction") return { ...base, type, transaction: publicStoredTransaction(data.transaction) };
+  if (type === "out_of_pocket") return { ...base, type, expense: publicStoredExpense(data.expense) };
+  return { ...base, type: "unmatched" as const };
+}
+
+function publicStoredTransaction(value: unknown) {
+  if (!value || typeof value !== "object") return null;
+  const transaction = value as Record<string, unknown>;
+  return {
+    id: transaction.id,
+    bankAccountId: transaction.bankAccountId,
+    bankAccountName: transaction.bankAccountName,
+    currency: "GBP" as const,
+    datedOn: transaction.datedOn,
+    amount: transaction.amount,
+    description: transaction.description,
+    fullDescription: transaction.fullDescription,
+    unexplainedAmount: transaction.unexplainedAmount,
+    score: transaction.score,
+    confidence: transaction.confidence,
+    dayDifference: transaction.dayDifference,
+    merchantSimilarity: transaction.merchantSimilarity,
+    factors: transaction.factors,
+    reasons: transaction.reasons,
+  };
+}
+
+function publicStoredExpense(value: unknown) {
+  if (!value || typeof value !== "object") return null;
+  const expense = value as Record<string, unknown>;
+  return {
+    claimantName: expense.claimantName,
+    category: expense.category,
+    datedOn: expense.datedOn,
+    currency: expense.currency,
+    grossValue: expense.grossValue,
+    nativeGrossValue: expense.nativeGrossValue,
+    description: expense.description,
+    vatTreatment: expense.vatTreatment,
+    attachmentName: expense.attachmentName,
+  };
+}
+
+function matchProposalLabel(proposal: Record<string, unknown>): string {
+  if (proposal.type === "transaction") {
+    const transaction = proposal.transaction as Record<string, unknown> | undefined;
+    return String(transaction?.description || transaction?.fullDescription || "Bank transaction").slice(0, 160);
+  }
+  if (proposal.type === "out_of_pocket") {
+    const expense = proposal.expense as Record<string, unknown> | undefined;
+    const category = expense?.category as Record<string, unknown> | undefined;
+    return `Out of pocket · ${String(category?.description ?? "Expense")}`.slice(0, 160);
+  }
+  return "No matching transaction";
+}
+
+function firestoreDate(value: unknown): string | null {
+  return value instanceof Timestamp ? value.toDate().toISOString() : null;
 }
 
 function parseStoredSelectedAccounts(value: unknown): FreeAgentBankAccount[] {

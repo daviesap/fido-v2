@@ -83,10 +83,27 @@ const BankTransactionsResponseSchema = z.object({
   bank_transactions: z.array(BankTransactionSchema).max(100),
 });
 
+const SpendingCategorySchema = z.object({
+  url: FreeAgentUrlSchema,
+  description: z.string().min(1).max(240),
+  nominal_code: z.string().min(1).max(40),
+  group_description: z.string().min(1).max(240).optional(),
+  allowable_for_tax: z.boolean().optional(),
+  auto_sales_tax_rate: z.string().min(1).max(80).optional(),
+});
+
+const CategoriesResponseSchema = z.object({
+  admin_expenses_categories: z.array(SpendingCategorySchema).max(500),
+  cost_of_sales_categories: z.array(SpendingCategorySchema).max(500),
+  income_categories: z.array(z.unknown()).max(500).optional(),
+  general_categories: z.array(z.unknown()).max(500).optional(),
+});
+
 export type FreeAgentTokens = z.infer<typeof TokenResponseSchema>;
 export type FreeAgentIdentity = ReturnType<typeof parseIdentity>;
 export type FreeAgentBankAccount = ReturnType<typeof normaliseBankAccount>;
 export type FreeAgentBankTransaction = ReturnType<typeof normaliseBankTransaction>;
+export type FreeAgentSpendingCategory = ReturnType<typeof normaliseSpendingCategory>;
 
 export type EncryptedSecret = {
   version: 1;
@@ -183,6 +200,19 @@ export async function fetchFreeAgentBankTransactions(input: {
     parse: (value) => BankTransactionsResponseSchema.parse(value).bank_transactions,
   });
   return transactions.map(normaliseBankTransaction);
+}
+
+export async function fetchFreeAgentSpendingCategories(
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<FreeAgentSpendingCategory[]> {
+  const categories = CategoriesResponseSchema.parse(await freeAgentGet("/v2/categories", accessToken, fetchImpl));
+  return [
+    ...categories.admin_expenses_categories.map((category) => normaliseSpendingCategory(category, "Admin expenses")),
+    ...categories.cost_of_sales_categories.map((category) => normaliseSpendingCategory(category, "Cost of sales")),
+  ].sort((left, right) => left.group.localeCompare(right.group)
+    || left.description.localeCompare(right.description)
+    || left.nominalCode.localeCompare(right.nominalCode));
 }
 
 export function encryptSecret(value: string, encodedKey: string): EncryptedSecret {
@@ -322,6 +352,22 @@ function normaliseBankTransaction(transaction: z.infer<typeof BankTransactionSch
     unexplainedAmount: transaction.unexplained_amount,
     transactionId: transaction.transaction_id ?? null,
     updatedAt: transaction.updated_at,
+  };
+}
+
+function normaliseSpendingCategory(
+  category: z.infer<typeof SpendingCategorySchema>,
+  group: "Admin expenses" | "Cost of sales",
+) {
+  return {
+    id: category.nominal_code,
+    url: category.url,
+    description: category.description,
+    nominalCode: category.nominal_code,
+    group,
+    groupDescription: category.group_description ?? group,
+    allowableForTax: category.allowable_for_tax ?? null,
+    autoSalesTaxRate: category.auto_sales_tax_rate ?? null,
   };
 }
 

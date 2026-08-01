@@ -24,6 +24,7 @@ import {
 import { useAuth } from "@/components/auth-provider";
 import { ReceiptReview } from "@/components/receipt-review";
 import { ReceiptVerification } from "@/components/receipt-verification";
+import { ReceiptMatching } from "@/components/receipt-matching";
 import { FreeAgentConnectionCard } from "@/components/freeagent-connection";
 import { db, functions, storage } from "@/lib/firebase";
 import { PROCESSING_VERSION, type ProcessedReceiptImage } from "@/lib/image-processing";
@@ -48,6 +49,7 @@ type ReviewTarget = { file: File; receipt?: EmailReviewReceipt };
 type ReadyToVerifyReceipt = Extract<Receipt, { status: "ready_for_extraction" }> & {
   extraction: ReadyForVerificationExtraction;
 };
+type VerifiedReceipt = Extract<Receipt, { status: "verified" }>;
 type ReceiptFilter = "all" | ReceiptQueue;
 
 const RECEIPT_FILTERS: { value: ReceiptFilter; label: string }[] = [
@@ -55,7 +57,8 @@ const RECEIPT_FILTERS: { value: ReceiptFilter; label: string }[] = [
   { value: "needs_review", label: "Needs review" },
   { value: "extracting", label: "Extracting" },
   { value: "ready_to_verify", label: "Ready to verify" },
-  { value: "verified", label: "Verified" },
+  { value: "ready_to_match", label: "Ready to match" },
+  { value: "proposed", label: "Proposals" },
   { value: "problems", label: "Problems" },
 ];
 
@@ -69,6 +72,7 @@ export function ReceiptApp() {
   const [message, setMessage] = useState<AppMessage | null>(null);
   const [selected, setSelected] = useState<Receipt | null>(null);
   const [verificationTarget, setVerificationTarget] = useState<ReadyToVerifyReceipt | null>(null);
+  const [matchingTarget, setMatchingTarget] = useState<VerifiedReceipt | null>(null);
   const [reviewTarget, setReviewTarget] = useState<ReviewTarget | null>(null);
   const [openingReviewId, setOpeningReviewId] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
@@ -229,6 +233,7 @@ export function ReceiptApp() {
       await deleteDoc(doc(db, "receipts", receipt.id));
       if (selected?.id === receipt.id) setSelected(null);
       if (verificationTarget?.id === receipt.id) setVerificationTarget(null);
+      if (matchingTarget?.id === receipt.id) setMatchingTarget(null);
       setMessage({ text: "Receipt and its derived image deleted." });
     } catch (error) {
       setMessage({ text: error instanceof Error ? error.message : "Delete failed.", error: true });
@@ -278,9 +283,9 @@ export function ReceiptApp() {
       </header>
       <main className="page">
         <section className="intro">
-          <p className="eyebrow">Stage six · read-only accounting</p>
+          <p className="eyebrow">Stage seven · matching proposals</p>
           <h1>Receipts ready to reconcile.</h1>
-          <p>Capture quickly, verify later, then compare each receipt with recent FreeAgent activity—or mark it as paid personally or with cash.</p>
+          <p>Fido ranks likely FreeAgent transactions and prepares out-of-pocket expenses, while every accounting change remains behind your review.</p>
         </section>
 
         <FreeAgentConnectionCard />
@@ -289,7 +294,7 @@ export function ReceiptApp() {
           <div>
             <p className="eyebrow light">Email a receipt</p>
             <h2>Forward attachments straight to Fido.</h2>
-            <p>Send a PDF or image attachment. It will arrive below as <strong>Needs review</strong>; email bodies and signatures are not stored.</p>
+            <p>Send a PDF, image, or readable receipt email. It will arrive below as <strong>Needs review</strong>; raw email markup and signatures are not retained.</p>
           </div>
           <button type="button" onClick={() => void copyReceiptEmail()}>
             <span>{receiptEmailAddress}</span>
@@ -357,6 +362,7 @@ export function ReceiptApp() {
                   onReview={() => receipt.status === "needs_review" ? void reviewEmailedReceipt(receipt) : undefined}
                   onVerify={() => isReadyToVerify(receipt) ? setVerificationTarget(receipt) : undefined}
                   onRetry={() => receipt.status === "ready_for_extraction" ? void retryExtraction(receipt) : undefined}
+                  onMatch={() => receipt.status === "verified" ? setMatchingTarget(receipt) : undefined}
                   onDelete={() => void remove(receipt)}
                 />
               ))}
@@ -373,6 +379,14 @@ export function ReceiptApp() {
           receipt={verificationTarget}
           onCancel={() => setVerificationTarget(null)}
           onVerify={(values) => verifyReceipt(verificationTarget, values)}
+        />
+      )}
+      {matchingTarget && (
+        <ReceiptMatching
+          key={matchingTarget.id}
+          receipt={matchingTarget}
+          onClose={() => setMatchingTarget(null)}
+          onSaved={(text) => setMessage({ text })}
         />
       )}
       {selected && <ReceiptViewer receipt={selected} onClose={() => setSelected(null)} onDelete={() => void remove(selected)} />}
@@ -439,6 +453,7 @@ function ReceiptCard({
   onReview,
   onVerify,
   onRetry,
+  onMatch,
   onDelete,
 }: {
   receipt: Receipt;
@@ -448,6 +463,7 @@ function ReceiptCard({
   onReview(): void;
   onVerify(): void;
   onRetry(): void;
+  onMatch(): void;
   onDelete(): void;
 }) {
   const needsReview = receipt.status === "needs_review";
@@ -511,11 +527,13 @@ function ReceiptCard({
           </dl>
         )}
         {needsReview && <small className="email-origin">From {receipt.email.sender}</small>}
+        {receipt.status === "verified" && receipt.matching && <small className="match-summary">{receipt.matching.label}</small>}
         <small>Added {date ? date.toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }) : "just now"} · {formatBytes(receipt.size)}</small>
       </div>
       <div className="receipt-card-actions">
         {needsReview && <button className="review-button" onClick={onReview} disabled={opening}>{opening ? "Opening…" : "Review receipt"}</button>}
         {queue === "ready_to_verify" && <button className="review-button" onClick={onVerify}>Verify values</button>}
+        {(queue === "ready_to_match" || queue === "proposed") && <button className="review-button" onClick={onMatch}>{queue === "proposed" ? "Review proposal" : "Match receipt"}</button>}
         {queue === "problems" && <button className="review-button" onClick={onRetry} disabled={retrying}>{retrying ? "Queuing…" : "Try again"}</button>}
         {queue === "extracting" && receipt.status === "ready_for_extraction" && !receipt.extraction
           ? <button className="review-button" onClick={onRetry} disabled={retrying}>{retrying ? "Queuing…" : "Start extraction"}</button>

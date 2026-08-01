@@ -155,6 +155,83 @@ describe("receipt display helpers", () => {
     })).toBeTruthy();
   });
 
+  it("moves verified receipts from ready to match into proposed", () => {
+    const base = ReceiptSchema.parse({
+      ownerUid: "owner",
+      status: "verified",
+      storagePath: "receipts/owner/id/original.jpg",
+      originalFileName: "receipt.jpg",
+      contentType: "image/jpeg",
+      size: 2000,
+      createdAt: null,
+      processedStoragePath: "receipts/owner/id/processed-v1.jpg",
+      processedContentType: "image/jpeg",
+      processedSize: 1500,
+      processing: {
+        version: 1,
+        rotation: 0,
+        crop: { x: 0, y: 0, width: 100, height: 100 },
+        sourceWidth: 1800,
+        sourceHeight: 2400,
+        outputWidth: 1800,
+        outputHeight: 2400,
+        qualityWarnings: [],
+        processedAt: null,
+      },
+      extraction: {
+        state: "ready_for_verification",
+        generation: 1,
+        attemptCount: 1,
+        queuedAt: null,
+        startedAt: null,
+        completedAt: null,
+        durationMs: 100,
+        schemaVersion: 2,
+        promptVersion: 2,
+        model: "gpt-5.6-luna",
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        result: {
+          merchantName: "Shop",
+          purchaseDescription: "Coffee",
+          receiptDate: "2026-07-30",
+          currency: "GBP",
+          grossTotal: "4.20",
+          netTotal: null,
+          vatTotal: null,
+          confidence: {
+            merchantName: "high",
+            purchaseDescription: "high",
+            receiptDate: "high",
+            currency: "high",
+            grossTotal: "high",
+            netTotal: "not_present",
+            vatTotal: "not_present",
+          },
+          warnings: [],
+        },
+      },
+      verifiedData: {
+        merchantName: "Shop",
+        purchaseDescription: "Coffee",
+        receiptDate: "2026-07-30",
+        currency: "GBP",
+        grossTotal: "4.20",
+        netTotal: null,
+        vatTotal: null,
+        gbpAmountCharged: null,
+      },
+      verifiedAt: null,
+    });
+    expect(receiptQueue({ id: "id", ...base })).toBe("ready_to_match");
+    expect(receiptStatusLabel({ id: "id", ...base })).toBe("Ready to match");
+    const proposed = ReceiptSchema.parse({
+      ...base,
+      matching: { state: "proposed", type: "transaction", label: "Coffee card payment", updatedAt: null },
+    });
+    expect(receiptQueue({ id: "id", ...proposed })).toBe("proposed");
+    expect(receiptStatusLabel({ id: "id", ...proposed })).toBe("Proposal ready");
+  });
+
   it("requires the real GBP charge only for foreign receipts", () => {
     const foreign = {
       merchantName: "Café de la Gare",
