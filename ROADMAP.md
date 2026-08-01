@@ -86,7 +86,8 @@ The user can approve a legible, correctly oriented receipt image, and both the u
 
 ### Implemented
 
-- Cloudflare Email Worker with MIME parsing, inline-image filtering, attachment/count/size limits, exact-recipient checks, and safe body-to-PDF fallback for attachment-free receipts.
+- Cloudflare Email Worker with MIME parsing, attachment/count/size limits, exact-recipient checks, and safe body-to-PDF handling for attachment-free receipts.
+- Sanitised HTML receipt rendering through Cloudflare Browser Run, with bounded embedded `cid:` images, JavaScript disabled, external requests blocked, and a plain-text PDF fallback when rendering is unavailable.
 - HMAC-SHA256 payload signing with a timestamp and nonce.
 - Firebase HTTPS Function with signature verification, strict payload parsing, byte-level file detection, rate limiting, deterministic deduplication, and private original storage.
 - `needs_review` receipt state with immutable email provenance and owner-only review transition rules.

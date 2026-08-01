@@ -1,5 +1,10 @@
 import PostalMime, { type Address, type Attachment } from "postal-mime";
-import { createEmailBodyAttachment } from "./email-body";
+import {
+  MAX_INLINE_IMAGE_BYTES,
+  MAX_TOTAL_INLINE_IMAGE_BYTES,
+  createEmailBodyAttachment,
+  type EmailInlineImage,
+} from "./email-body";
 import {
   INGEST_PROTOCOL_VERSION,
   MAX_ATTACHMENTS,
@@ -19,6 +24,7 @@ type Env = {
   FIDO_PUBLIC_RECEIPT_ADDRESS: string;
   FIDO_PRIVATE_INGEST_ADDRESS: string;
   FIDO_INGEST_SHARED_SECRET: string;
+  BROWSER?: BrowserRun;
 };
 
 export default {
@@ -44,11 +50,21 @@ export default {
     }
 
     const attachments: IngestAttachment[] = [];
+    const inlineImages: EmailInlineImage[] = [];
     let totalBytes = 0;
+    let totalInlineImageBytes = 0;
     for (const attachment of parsed.attachments) {
       const filename = safeAttachmentName(attachment);
       const isPdf = attachment.mimeType.toLowerCase() === "application/pdf" || /\.pdf$/i.test(filename);
-      if (!isPdf && (attachment.related || attachment.disposition === "inline")) continue;
+      if (!isPdf && (attachment.related || attachment.disposition === "inline")) {
+        const inlineImage = emailInlineImage(attachment);
+        if (inlineImage && inlineImage.size <= MAX_INLINE_IMAGE_BYTES
+          && totalInlineImageBytes + inlineImage.size <= MAX_TOTAL_INLINE_IMAGE_BYTES) {
+          inlineImages.push(inlineImage);
+          totalInlineImageBytes += inlineImage.size;
+        }
+        continue;
+      }
       if (!isSupportedAttachment(filename, attachment.mimeType)) continue;
       const bytes = attachmentBytes(attachment);
       if (bytes.byteLength === 0 || bytes.byteLength > MAX_ATTACHMENT_BYTES) continue;
@@ -73,6 +89,8 @@ export default {
       receivedAt,
       text: parsed.text,
       html: parsed.html,
+      inlineImages,
+      renderHtmlPdf: env.BROWSER ? (html) => renderHtmlPdf(env.BROWSER!, html) : undefined,
     });
     if (bodyAttachment) attachments.push(bodyAttachment);
 
@@ -122,6 +140,26 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
+async function renderHtmlPdf(browser: BrowserRun, html: string): Promise<Uint8Array> {
+  const response = await browser.quickAction("pdf", {
+    html,
+    setJavaScriptEnabled: false,
+    allowRequestPattern: ["/^(?:data|about):/i"],
+    rejectResourceTypes: ["script", "xhr", "fetch", "websocket", "eventsource", "media", "font"],
+    cacheTTL: 0,
+    actionTimeout: 30_000,
+    pdfOptions: {
+      format: "a4",
+      printBackground: true,
+      margin: { top: "18mm", right: "14mm", bottom: "18mm", left: "14mm" },
+    },
+  });
+  if (!response.ok || !response.headers.get("content-type")?.toLowerCase().startsWith("application/pdf")) {
+    throw new Error(`HTML receipt rendering failed (${response.status})`);
+  }
+  return new Uint8Array(await response.arrayBuffer());
+}
+
 function attachmentBytes(attachment: Attachment): Uint8Array {
   if (attachment.content instanceof ArrayBuffer) return new Uint8Array(attachment.content);
   if (attachment.content instanceof Uint8Array) return attachment.content;
@@ -130,6 +168,28 @@ function attachmentBytes(attachment: Attachment): Uint8Array {
     return Uint8Array.from(binary, (character) => character.charCodeAt(0));
   }
   return new TextEncoder().encode(attachment.content);
+}
+
+function emailInlineImage(attachment: Attachment): EmailInlineImage | null {
+  const contentId = attachment.contentId?.trim();
+  const mimeType = normaliseInlineImageType(attachment.mimeType);
+  if (!contentId || !mimeType) return null;
+  const bytes = attachmentBytes(attachment);
+  if (!bytes.byteLength) return null;
+  return {
+    contentId,
+    mimeType,
+    contentBase64: bytesToBase64(bytes),
+    size: bytes.byteLength,
+  };
+}
+
+function normaliseInlineImageType(value: string): EmailInlineImage["mimeType"] | null {
+  const type = value.toLowerCase().split(";", 1)[0].trim();
+  if (type === "image/jpg") return "image/jpeg";
+  return ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(type)
+    ? type as EmailInlineImage["mimeType"]
+    : null;
 }
 
 function safeAttachmentName(attachment: Attachment): string {
