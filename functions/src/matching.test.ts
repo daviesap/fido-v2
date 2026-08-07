@@ -50,8 +50,17 @@ describe("receipt transaction matching", () => {
     expect(result.otherTransactions.map((candidate) => candidate.id)).toEqual(["wrong-amount"]);
   });
 
-  it("does not suggest exact amounts outside the three-day window", () => {
+  it("still suggests an exact amount within the month window, scored lower", () => {
     const result = rankTransactionMatches(receipt, [transaction({ datedOn: "2026-08-05" })]);
+    expect(result.suggestions.map((candidate) => candidate.id)).toEqual(["transaction-1"]);
+    expect(result.suggestions[0]).toMatchObject({
+      dayDifference: 7,
+      factors: { amount: 50, date: 7 },
+    });
+  });
+
+  it("does not suggest exact amounts outside the month window", () => {
+    const result = rankTransactionMatches(receipt, [transaction({ datedOn: "2026-09-15" })]);
     expect(result.suggestions).toHaveLength(0);
     expect(result.otherTransactions).toHaveLength(1);
   });
@@ -105,7 +114,7 @@ describe("receipt transaction matching", () => {
     };
     const result = rankForeignTransactionMatches(foreignReceipt, [
       transaction({ id: "unrelated", datedOn: "2026-08-01", amount: "-3.58", description: "Coffee Shop", fullDescription: "Coffee Shop" }),
-      transaction({ id: "distant", datedOn: "2026-08-10", amount: "-3.58", description: "DigitalOcean", fullDescription: "DigitalOcean" }),
+      transaction({ id: "distant", datedOn: "2026-09-15", amount: "-3.58", description: "DigitalOcean", fullDescription: "DigitalOcean" }),
       transaction({ id: "implausible", datedOn: "2026-08-01", amount: "-358.00", description: "DigitalOcean", fullDescription: "DigitalOcean" }),
       transaction({ id: "credit", datedOn: "2026-08-01", amount: "3.58", description: "DigitalOcean", fullDescription: "DigitalOcean" }),
     ]);

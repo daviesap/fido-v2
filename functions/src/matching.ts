@@ -47,7 +47,7 @@ export type RankedTransaction = MatchingTransaction & {
   reasons: string[];
 };
 
-const MAX_SUGGESTED_DAY_DIFFERENCE = 3;
+const MAX_SUGGESTED_DAY_DIFFERENCE = 30;
 
 // These intentionally broad bands are plausibility checks, not exchange-rate
 // calculations. The selected bank debit remains the authoritative GBP value.
@@ -234,7 +234,7 @@ function dayScore(dayDifference: number): number {
   if (dayDifference === 1) return 20;
   if (dayDifference === 2) return 14;
   if (dayDifference === 3) return 8;
-  return 0;
+  return decayedDayScore(dayDifference, 8);
 }
 
 function foreignDayScore(dayDifference: number): number {
@@ -242,7 +242,16 @@ function foreignDayScore(dayDifference: number): number {
   if (dayDifference === 1) return 24;
   if (dayDifference === 2) return 16;
   if (dayDifference === 3) return 8;
-  return 0;
+  return decayedDayScore(dayDifference, 8);
+}
+
+// Beyond the close-in scores above, points taper linearly from `startingScore`
+// at day 3 down to 0 at MAX_SUGGESTED_DAY_DIFFERENCE, so month-old matches can
+// still surface (on exact amount + merchant) but score below closer ones.
+function decayedDayScore(dayDifference: number, startingScore: number): number {
+  if (dayDifference > MAX_SUGGESTED_DAY_DIFFERENCE) return 0;
+  const span = MAX_SUGGESTED_DAY_DIFFERENCE - 3;
+  return Math.max(0, Math.round(startingScore * (MAX_SUGGESTED_DAY_DIFFERENCE - dayDifference) / span));
 }
 
 function foreignAmountPlausibility(currency: string, originalAmount: bigint, debitGbpAmount: bigint): number {
