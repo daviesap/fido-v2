@@ -43,6 +43,6 @@ Stage 8 will show a separate final confirmation before calling `POST /v2/expense
 - original currency and amount;
 - negative native GBP value for a foreign receipt, using the owner-entered real GBP charge;
 - explicitly reviewed VAT treatment;
-- the processed JPEG as an attachment, kept within FreeAgent's 5 MB limit.
+- the processed JPEG or complete emailed PDF as an attachment, kept within FreeAgent's 5 MB limit.
 
 No out-of-pocket write is enabled during Stage 6. The official contracts are [Expenses](https://dev.freeagent.com/docs/expenses), [Categories](https://dev.freeagent.com/docs/categories), and [Attachments](https://dev.freeagent.com/docs/attachments).

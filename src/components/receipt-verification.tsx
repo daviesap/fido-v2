@@ -191,9 +191,15 @@ export function ReceiptVerification({
         <div className="verification-workspace">
           <div className="verification-image">
             {imageUrl ? (
-              // The private image is loaded through the authenticated Firebase SDK.
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={imageUrl} alt={`Processed ${receipt.originalFileName}`} />
+              receipt.processedContentType === "application/pdf" ? (
+                <object className="viewer-pdf" data={imageUrl} type="application/pdf" aria-label={`Complete ${receipt.originalFileName}`}>
+                  <a href={imageUrl} download={receipt.originalFileName}>Open the complete PDF</a>
+                </object>
+              ) : (
+                // The private image is loaded through the authenticated Firebase SDK.
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={imageUrl} alt={`Processed ${receipt.originalFileName}`} />
+              )
             ) : <span>{imageFailed ? "Preview unavailable" : "Loading receipt…"}</span>}
           </div>
 

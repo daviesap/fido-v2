@@ -70,6 +70,20 @@ const emailReviewFields = {
   reviewedAt: serverTimestamp(),
 };
 
+const completePdfReviewFields = {
+  status: "ready_for_extraction",
+  processedStoragePath: emailedReceipt.storagePath,
+  processedContentType: "application/pdf",
+  processedSize: emailedReceipt.size,
+  processing: {
+    version: 1,
+    mode: "document",
+    pageCount: 2,
+    processedAt: serverTimestamp(),
+  },
+  reviewedAt: serverTimestamp(),
+};
+
 const readyExtraction = {
   state: "ready_for_verification",
   generation: 1,
@@ -162,6 +176,26 @@ describe("Firestore receipt rules", () => {
     }));
   });
 
+  it("lets the owner store a manually chosen PDF as one complete document", async () => {
+    const db = testEnv.authenticatedContext(ownerUid, { fidoOwner: true }).firestore();
+    const receiptRef = doc(db, "receipts/receipt-1");
+    const storagePath = `receipts/${ownerUid}/receipt-1/original-receipt.pdf`;
+
+    await assertSucceeds(setDoc(receiptRef, {
+      ownerUid,
+      status: "ready_for_extraction",
+      storagePath,
+      originalFileName: "receipt.pdf",
+      contentType: "application/pdf",
+      size: 1234,
+      processedStoragePath: storagePath,
+      processedContentType: "application/pdf",
+      processedSize: 1234,
+      processing: { version: 1, mode: "document", pageCount: 2, processedAt: serverTimestamp() },
+      createdAt: serverTimestamp(),
+    }));
+  });
+
   it("rejects invalid reviewed receipt paths, crop bounds, and output dimensions", async () => {
     const db = testEnv.authenticatedContext(ownerUid, { fidoOwner: true }).firestore();
 
@@ -196,6 +230,34 @@ describe("Firestore receipt rules", () => {
 
     await assertSucceeds(updateDoc(receiptRef, emailReviewFields));
     await assertSucceeds(getDoc(receiptRef));
+  });
+
+  it("lets the owner queue every page of an emailed PDF without creating a cropped asset", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "receipts/receipt-1"), emailedReceipt);
+    });
+    const db = testEnv.authenticatedContext(ownerUid, { fidoOwner: true }).firestore();
+    const receiptRef = doc(db, "receipts/receipt-1");
+
+    await assertSucceeds(updateDoc(receiptRef, completePdfReviewFields));
+    await assertSucceeds(getDoc(receiptRef));
+  });
+
+  it("rejects incomplete or substituted emailed PDF document assets", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "receipts/receipt-1"), emailedReceipt);
+    });
+    const db = testEnv.authenticatedContext(ownerUid, { fidoOwner: true }).firestore();
+    const receiptRef = doc(db, "receipts/receipt-1");
+
+    await assertFails(updateDoc(receiptRef, {
+      ...completePdfReviewFields,
+      processedStoragePath: `receipts/${ownerUid}/receipt-1/substitute.pdf`,
+    }));
+    await assertFails(updateDoc(receiptRef, {
+      ...completePdfReviewFields,
+      processing: { ...completePdfReviewFields.processing, pageCount: 0 },
+    }));
   });
 
   it("rejects review updates that change an emailed receipt's original or provenance", async () => {

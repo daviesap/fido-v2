@@ -44,7 +44,7 @@ The saved proposal contains:
 - original currency and negative gross value;
 - owner-entered negative native GBP value for foreign receipts;
 - an explicit VAT note;
-- the processed JPEG attachment name.
+- the processed JPEG or complete PDF attachment name.
 
 Foreign receipts are always marked as having no UK VAT. Printed VAT on a GBP receipt is flagged for explicit Stage 8 confirmation rather than converted into a FreeAgent tax decision automatically.
 
@@ -56,7 +56,7 @@ Deleting a receipt removes its proposal. Disconnecting FreeAgent removes the tra
 
 ## Stage 8 hand-off
 
-Stage 8A reads a bank-transaction proposal, shows the live existing explanation, and requires a separate confirmation before attaching the processed JPEG. It displays the current explanation category but never submits or changes that category. Split, partial, locked, oversized, or conflicting attachments are blocked; successful writes are read back and audited. Stage 8B will apply the same preview-and-confirm pattern to out-of-pocket Expense creation.
+Stage 8A reads a bank-transaction proposal, shows the live existing explanation, and requires a separate confirmation before attaching the processed JPEG or complete emailed PDF. It displays the current explanation category but never submits or changes that category. Split, partial, locked, oversized, or conflicting attachments are blocked; successful writes are read back and audited. Stage 8B will apply the same preview-and-confirm pattern to out-of-pocket Expense creation.
 
 Official API references:
 

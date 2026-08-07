@@ -168,27 +168,36 @@ export const ReceiptExtractionSchema = z.union([
   }),
 ]);
 
+const ImageProcessingSchema = z.object({
+  version: z.literal(1),
+  rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]),
+  crop: z.object({
+    x: z.number().min(0).max(100),
+    y: z.number().min(0).max(100),
+    width: z.number().positive().max(100),
+    height: z.number().positive().max(100),
+  }),
+  sourceWidth: z.number().int().positive(),
+  sourceHeight: z.number().int().positive(),
+  outputWidth: z.number().int().positive(),
+  outputHeight: z.number().int().positive(),
+  sourcePage: z.number().int().positive().nullable().optional(),
+  qualityWarnings: z.array(QualityWarningSchema).max(6),
+  processedAt: z.unknown(),
+});
+
+const DocumentProcessingSchema = z.object({
+  version: z.literal(1),
+  mode: z.literal("document"),
+  pageCount: z.number().int().positive().max(1000),
+  processedAt: z.unknown(),
+});
+
 const ProcessingFieldsSchema = z.object({
   processedStoragePath: z.string().min(1),
-  processedContentType: z.literal("image/jpeg"),
+  processedContentType: z.union([z.literal("image/jpeg"), z.literal("application/pdf")]),
   processedSize: z.number().int().positive().max(MAX_RECEIPT_BYTES),
-  processing: z.object({
-    version: z.literal(1),
-    rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]),
-    crop: z.object({
-      x: z.number().min(0).max(100),
-      y: z.number().min(0).max(100),
-      width: z.number().positive().max(100),
-      height: z.number().positive().max(100),
-    }),
-    sourceWidth: z.number().int().positive(),
-    sourceHeight: z.number().int().positive(),
-    outputWidth: z.number().int().positive(),
-    outputHeight: z.number().int().positive(),
-    sourcePage: z.number().int().positive().nullable().optional(),
-    qualityWarnings: z.array(QualityWarningSchema).max(6),
-    processedAt: z.unknown(),
-  }),
+  processing: z.union([ImageProcessingSchema, DocumentProcessingSchema]),
   source: z.literal("email").optional(),
   contentHash: z.string().length(64).optional(),
   email: EmailFieldsSchema.shape.email.optional(),
@@ -239,6 +248,16 @@ export function displayStoragePath(receipt: Receipt): string {
 
 export function hasProcessedAsset(receipt: Receipt): receipt is Extract<Receipt, { status: "ready_for_extraction" | "verified" }> {
   return receipt.status === "ready_for_extraction" || receipt.status === "verified";
+}
+
+export function hasSeparateProcessedAsset(receipt: Receipt): boolean {
+  return hasProcessedAsset(receipt) && receipt.processedStoragePath !== receipt.storagePath;
+}
+
+export function isPdfAsset(receipt: Receipt): boolean {
+  return hasProcessedAsset(receipt)
+    ? receipt.processedContentType === "application/pdf"
+    : receipt.contentType === "application/pdf";
 }
 
 export function receiptQueue(receipt: Receipt): ReceiptQueue {
