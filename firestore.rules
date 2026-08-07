@@ -46,7 +46,7 @@ service cloud.firestore {
         && crop.y + crop.height <= 100.001;
     }
 
-    function isValidProcessing(processing) {
+    function isValidImageProcessing(processing) {
       return processing is map
         && processing.keys().hasOnly([
           'version', 'rotation', 'crop', 'sourceWidth', 'sourceHeight',
@@ -71,16 +71,47 @@ service cloud.firestore {
         && processing.processedAt == request.time;
     }
 
-    function isReviewedReceipt(receiptId) {
-      return request.resource.data.status == 'ready_for_extraction'
-        && hasValidReceiptBase(receiptId)
-        && request.resource.data.processedStoragePath ==
+    function isValidDocumentProcessing(processing) {
+      return processing is map
+        && processing.keys().hasOnly(['version', 'mode', 'pageCount', 'processedAt'])
+        && processing.version == 1
+        && processing.mode == 'document'
+        && processing.pageCount is int
+        && processing.pageCount > 0
+        && processing.pageCount <= 1000
+        && processing.processedAt == request.time;
+    }
+
+    function hasValidProcessedImage(receiptId) {
+      return request.resource.data.processedStoragePath ==
           'receipts/' + request.auth.uid + '/' + receiptId + '/processed-v1.jpg'
         && request.resource.data.processedContentType == 'image/jpeg'
         && request.resource.data.processedSize is int
         && request.resource.data.processedSize > 0
         && request.resource.data.processedSize < 20 * 1024 * 1024
-        && isValidProcessing(request.resource.data.processing)
+        && isValidImageProcessing(request.resource.data.processing);
+    }
+
+    function hasValidCompletePdf() {
+      return request.resource.data.contentType == 'application/pdf'
+        && request.resource.data.processedStoragePath == request.resource.data.storagePath
+        && request.resource.data.processedContentType == 'application/pdf'
+        && request.resource.data.processedSize == request.resource.data.size
+        && isValidDocumentProcessing(request.resource.data.processing);
+    }
+
+    function hasValidCompleteEmailPdf() {
+      return resource.data.source == 'email'
+        && resource.data.contentType == 'application/pdf'
+        && request.resource.data.processedStoragePath == resource.data.storagePath
+        && request.resource.data.processedSize == resource.data.size
+        && hasValidCompletePdf();
+    }
+
+    function isReviewedReceipt(receiptId) {
+      return request.resource.data.status == 'ready_for_extraction'
+        && hasValidReceiptBase(receiptId)
+        && (hasValidProcessedImage(receiptId) || hasValidCompletePdf())
         && request.resource.data.keys().hasOnly([
           'ownerUid', 'status', 'storagePath', 'originalFileName',
           'contentType', 'size', 'createdAt', 'processedStoragePath',
@@ -101,13 +132,7 @@ service cloud.firestore {
         && request.resource.data.source == resource.data.source
         && request.resource.data.contentHash == resource.data.contentHash
         && request.resource.data.email == resource.data.email
-        && request.resource.data.processedStoragePath ==
-          'receipts/' + request.auth.uid + '/' + receiptId + '/processed-v1.jpg'
-        && request.resource.data.processedContentType == 'image/jpeg'
-        && request.resource.data.processedSize is int
-        && request.resource.data.processedSize > 0
-        && request.resource.data.processedSize < 20 * 1024 * 1024
-        && isValidProcessing(request.resource.data.processing)
+        && (hasValidProcessedImage(receiptId) || hasValidCompleteEmailPdf())
         && request.resource.data.reviewedAt == request.time
         && request.resource.data.keys().hasOnly([
           'ownerUid', 'status', 'source', 'storagePath', 'originalFileName',

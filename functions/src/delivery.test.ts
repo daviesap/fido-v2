@@ -18,6 +18,10 @@ const explanation = {
 };
 
 describe("FreeAgent attachment eligibility", () => {
+  it("uses a PDF filename for complete document receipts", () => {
+    expect(attachmentFileName("receipt-1", "application/x-pdf")).toBe("fido-receipt-receipt-1.pdf");
+  });
+
   it("allows only a complete single existing explanation", () => {
     expect(evaluateAttachmentEligibility({
       transaction,

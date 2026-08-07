@@ -112,6 +112,33 @@ describe("receipt display helpers", () => {
     expect(displayStoragePath({ id: "id", ...parsed })).toBe("receipts/owner/id/original-receipt.pdf");
   });
 
+  it("uses the complete emailed PDF after document review", () => {
+    const parsed = ReceiptSchema.parse({
+      ownerUid: "owner",
+      status: "ready_for_extraction",
+      source: "email",
+      storagePath: "receipts/owner/id/original-receipt.pdf",
+      originalFileName: "receipt.pdf",
+      contentType: "application/pdf",
+      size: 2000,
+      contentHash: "a".repeat(64),
+      email: {
+        sender: "sender@example.com",
+        subject: "Receipt",
+        messageId: "<message@example.com>",
+        receivedAt: null,
+      },
+      createdAt: null,
+      processedStoragePath: "receipts/owner/id/original-receipt.pdf",
+      processedContentType: "application/pdf",
+      processedSize: 2000,
+      processing: { version: 1, mode: "document", pageCount: 2, processedAt: null },
+      reviewedAt: null,
+    });
+
+    expect(displayStoragePath({ id: "id", ...parsed })).toBe("receipts/owner/id/original-receipt.pdf");
+  });
+
   it("shows newly reviewed receipts as extracting", () => {
     const parsed = ReceiptSchema.parse({
       ownerUid: "owner",

@@ -275,7 +275,7 @@ export async function updateFreeAgentExplanationAttachment(input: {
     data: string;
     fileName: string;
     description: string;
-    contentType: "image/jpeg";
+    contentType: "image/jpeg" | "application/x-pdf";
   };
   fetchImpl?: typeof fetch;
 }): Promise<FreeAgentBankTransactionExplanation> {

@@ -242,18 +242,26 @@ export const extractReceipt = onTaskDispatched<ExtractionTask>({
   const startedAt = Date.now();
   try {
     const processedStoragePath = receipt.processedStoragePath;
-    const expectedStoragePath = `receipts/${receipt.ownerUid}/${payload.receiptId}/processed-v1.jpg`;
-    if (typeof processedStoragePath !== "string" || processedStoragePath !== expectedStoragePath) {
+    const processedContentType = receipt.processedContentType;
+    const expectedImagePath = `receipts/${receipt.ownerUid}/${payload.receiptId}/processed-v1.jpg`;
+    const validImage = processedContentType === "image/jpeg" && processedStoragePath === expectedImagePath;
+    const validCompletePdf = processedContentType === "application/pdf"
+      && receipt.contentType === "application/pdf"
+      && processedStoragePath === receipt.storagePath;
+    if (typeof processedStoragePath !== "string" || (!validImage && !validCompletePdf)) {
       throw new PermanentExtractionError("invalid_processed_asset");
     }
-    const [image] = await getStorage().bucket().file(processedStoragePath).download();
-    if (!image.length || image.length >= 20 * 1024 * 1024) {
+    const extractionContentType: "image/jpeg" | "application/pdf" = validCompletePdf ? "application/pdf" : "image/jpeg";
+    const [file] = await getStorage().bucket().file(processedStoragePath).download();
+    if (!file.length || file.length >= 20 * 1024 * 1024 || file.length !== Number(receipt.processedSize)) {
       throw new PermanentExtractionError("invalid_processed_asset");
     }
 
     const extracted = await extractReceiptValues({
       client: new OpenAI({ apiKey: openaiApiKey.value(), maxRetries: 0, timeout: 120_000 }),
-      image,
+      file,
+      contentType: extractionContentType,
+      fileName: typeof receipt.originalFileName === "string" ? receipt.originalFileName : undefined,
       model: receiptModel.value(),
     });
 
@@ -712,7 +720,10 @@ export const saveReceiptMatchProposal = onCall({
         claimantUrl,
         claimantName: [profile?.firstName, profile?.lastName].filter((value) => typeof value === "string").join(" ") || "FreeAgent user",
         category,
-        attachmentName: `receipt-${selection.receiptId}.jpg`,
+        attachmentName: attachmentFileName(
+          selection.receiptId,
+          receipt.data.processedContentType === "application/pdf" ? "application/x-pdf" : "image/jpeg",
+        ),
       }),
     };
   } else {
@@ -749,7 +760,7 @@ export const getReceiptAttachmentPreview = onCall({
   try {
     const context = await receiptAttachmentContext(ownerUid, receiptId);
     const target = await liveAttachmentTarget(ownerUid, context.transactionUrl);
-    const fileName = attachmentFileName(receiptId);
+    const fileName = attachmentFileName(receiptId, context.attachmentContentType);
     const eligibility = evaluateAttachmentEligibility({
       transaction: target.transaction,
       explanation: target.explanation,
@@ -805,7 +816,7 @@ export const confirmReceiptAttachment = onCall({
   try {
     const context = await receiptAttachmentContext(ownerUid, receiptId);
     const target = await liveAttachmentTarget(ownerUid, context.transactionUrl);
-    const fileName = attachmentFileName(receiptId);
+    const fileName = attachmentFileName(receiptId, context.attachmentContentType);
     const eligibility = evaluateAttachmentEligibility({
       transaction: target.transaction,
       explanation: target.explanation,
@@ -826,11 +837,14 @@ export const confirmReceiptAttachment = onCall({
     }
     claimed = true;
 
-    const expectedPath = `receipts/${ownerUid}/${receiptId}/processed-v1.jpg`;
-    if (context.processedStoragePath !== expectedPath) throw new HttpsError("failed-precondition", "The processed receipt path is invalid.");
-    const [image] = await getStorage().bucket().file(expectedPath).download();
-    if (!image.length || image.length > FREEAGENT_ATTACHMENT_MAX_BYTES || image.length !== context.processedSize) {
-      throw new HttpsError("failed-precondition", "The processed receipt no longer matches the confirmed preview.");
+    const expectedImagePath = `receipts/${ownerUid}/${receiptId}/processed-v1.jpg`;
+    const validAssetPath = context.attachmentContentType === "image/jpeg"
+      ? context.processedStoragePath === expectedImagePath
+      : context.processedStoragePath === context.originalStoragePath;
+    if (!validAssetPath) throw new HttpsError("failed-precondition", "The receipt attachment path is invalid.");
+    const [asset] = await getStorage().bucket().file(context.processedStoragePath).download();
+    if (!asset.length || asset.length > FREEAGENT_ATTACHMENT_MAX_BYTES || asset.length !== context.processedSize) {
+      throw new HttpsError("failed-precondition", "The receipt no longer matches the confirmed preview.");
     }
 
     let updatedExplanation = target.explanation;
@@ -839,10 +853,10 @@ export const confirmReceiptAttachment = onCall({
         accessToken,
         explanationUrl: target.explanation!.url,
         attachment: {
-          data: image.toString("base64"),
+          data: asset.toString("base64"),
           fileName,
           description: `Receipt for ${context.merchantName}`.slice(0, 255),
-          contentType: "image/jpeg",
+          contentType: context.attachmentContentType,
         },
       }));
     }
@@ -880,7 +894,7 @@ export const confirmReceiptAttachment = onCall({
         fileSize: verifiedExplanation.attachment.fileSize,
         contentType: verifiedExplanation.attachment.contentType,
         sourceStoragePath: context.processedStoragePath,
-        sourceSha256: hash(image),
+        sourceSha256: hash(asset),
       },
       confirmedBy: ownerUid,
       confirmedAt: FieldValue.serverTimestamp(),
@@ -966,6 +980,8 @@ type ReceiptAttachmentContext = {
   merchantName: string;
   processedStoragePath: string;
   processedSize: number;
+  originalStoragePath: string;
+  attachmentContentType: "image/jpeg" | "application/x-pdf";
   transactionId: string;
   transactionUrl: string;
   transactionDescription: string;
@@ -988,9 +1004,13 @@ async function receiptAttachmentContext(ownerUid: string, receiptId: string): Pr
   const transaction = proposal.get("transaction") as Record<string, unknown> | undefined;
   const processedStoragePath = String(receipt.data.processedStoragePath ?? "");
   const processedSize = Number(receipt.data.processedSize ?? 0);
+  const originalStoragePath = String(receipt.data.storagePath ?? "");
+  const processedContentType = String(receipt.data.processedContentType ?? "");
+  const attachmentContentType = processedContentType === "application/pdf" ? "application/x-pdf" as const : "image/jpeg" as const;
   const transactionId = typeof transaction?.id === "string" ? transaction.id : "";
   const transactionUrl = typeof transaction?.url === "string" ? transaction.url : "";
-  if (!processedStoragePath || !Number.isSafeInteger(processedSize) || processedSize <= 0
+  if (!processedStoragePath || !originalStoragePath || !["image/jpeg", "application/pdf"].includes(processedContentType)
+    || !Number.isSafeInteger(processedSize) || processedSize <= 0
     || !transactionId || !transactionUrl) {
     throw new HttpsError("failed-precondition", "The verified receipt or saved transaction match is incomplete.");
   }
@@ -999,6 +1019,8 @@ async function receiptAttachmentContext(ownerUid: string, receiptId: string): Pr
     merchantName: receipt.verified.merchantName,
     processedStoragePath,
     processedSize,
+    originalStoragePath,
+    attachmentContentType,
     transactionId,
     transactionUrl,
     transactionDescription: String(transaction?.description || transaction?.fullDescription || "Bank transaction"),
@@ -1028,6 +1050,7 @@ function attachmentTargetFingerprint(context: ReceiptAttachmentContext, target: 
       id: context.receiptId,
       processedStoragePath: context.processedStoragePath,
       processedSize: context.processedSize,
+      attachmentContentType: context.attachmentContentType,
     },
     proposal: {
       transactionId: context.transactionId,
@@ -1095,9 +1118,9 @@ function publicAttachmentPreview(
       } : null,
     } : null,
     attachment: {
-      fileName: attachmentFileName(context.receiptId),
+      fileName: attachmentFileName(context.receiptId, context.attachmentContentType),
       fileSize: context.processedSize,
-      contentType: "image/jpeg" as const,
+      contentType: context.attachmentContentType,
     },
     blockers: eligibility.blockers,
     reconcileExisting: eligibility.reconcileExisting,
@@ -1340,6 +1363,7 @@ function proposalReceiptSnapshot(receiptId: string, receipt: VerifiedReceiptForM
   return {
     ...publicMatchingReceipt(receiptId, receipt),
     processedStoragePath: String(receipt.data.processedStoragePath ?? ""),
+    processedContentType: String(receipt.data.processedContentType ?? "image/jpeg"),
     processedSize: Number(receipt.data.processedSize ?? 0),
   };
 }

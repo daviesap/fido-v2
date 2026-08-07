@@ -6,7 +6,7 @@ Stage 8A can attach a verified receipt to one existing, fully explained FreeAgen
 
 1. Stage 7 saves a private transaction proposal without changing FreeAgent.
 2. Opening that proposal makes a live request for the bank transaction and its existing explanation.
-3. Fido shows the transaction, explanation type, current category nominal code, amount, date, and exact JPEG filename and size.
+3. Fido shows the transaction, explanation type, current category nominal code, amount, date, and exact receipt filename and size.
 4. The owner separately chooses **Attach receipt to FreeAgent**.
 5. Fido repeats the live checks, verifies a short-lived preview fingerprint, downloads the exact processed asset, and sends an attachment-only `PUT`.
 6. Fido reads the explanation back, verifies the deterministic filename, and records a private delivery audit.
@@ -22,7 +22,7 @@ Delivery is blocked when:
 - the explanation does not cover the full transaction amount;
 - FreeAgent has locked the explanation;
 - another attachment is already present;
-- the processed JPEG is missing, changed, empty, or larger than 5 MB; or
+- the processed JPEG or complete PDF is missing, changed, empty, or larger than 5 MB; or
 - the live transaction, explanation, attachment, or category changes between preview and confirmation.
 
 The filename is deterministic: `fido-receipt-{receiptId}.jpg`. If a previous request succeeded remotely but its response was lost, a retry recognises that filename, reads the explanation back, and completes the local audit without uploading a duplicate.

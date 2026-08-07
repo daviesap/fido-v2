@@ -4,7 +4,7 @@ Stage 4 keeps capture responsive by moving OpenAI work entirely off the browser 
 
 ## Flow
 
-1. The owner approves a processed receipt JPEG.
+1. The owner approves either a processed receipt JPEG or a complete emailed PDF.
 2. Firestore stores the receipt as `ready_for_extraction` and immediately returns control to the browser.
 3. `queueReceiptExtraction` notices the transition and enqueues a private, deterministic Cloud Task.
 4. `extractReceipt` downloads only `processed-v1.jpg`, calls the OpenAI Responses API, validates the structured result, and updates the receipt.
@@ -53,7 +53,7 @@ Firebase ignores that project-specific file in Git. Keep the API key in Secret M
 The API request uses:
 
 - the Responses API;
-- a base64 JPEG input with explicit high detail;
+- a base64 high-detail JPEG input, or a complete base64 PDF file input whose text and page images are both read;
 - Structured Outputs with a strict JSON Schema;
 - explicit `reasoning: { effort: "none" }`;
 - `store: false`;

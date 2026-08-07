@@ -23,8 +23,8 @@ export function evaluateAttachmentEligibility(input: {
   expectedFileName: string;
 }): { eligible: boolean; reconcileExisting: boolean; blockers: string[] } {
   const blockers: string[] = [];
-  if (input.assetSize <= 0) blockers.push("The processed receipt image is empty.");
-  if (input.assetSize > FREEAGENT_ATTACHMENT_MAX_BYTES) blockers.push("The processed receipt image exceeds FreeAgent's 5 MB attachment limit.");
+  if (input.assetSize <= 0) blockers.push("The receipt attachment is empty.");
+  if (input.assetSize > FREEAGENT_ATTACHMENT_MAX_BYTES) blockers.push("The receipt attachment exceeds FreeAgent's 5 MB attachment limit.");
   const unexplainedAmount = moneyToMinorUnits(input.transaction.unexplainedAmount);
   if (unexplainedAmount === null) {
     blockers.push("FreeAgent returned an invalid unexplained amount.");
@@ -61,8 +61,8 @@ export function evaluateAttachmentEligibility(input: {
   return { eligible: blockers.length === 0, reconcileExisting, blockers };
 }
 
-export function attachmentFileName(receiptId: string): string {
-  return `fido-receipt-${receiptId}.jpg`;
+export function attachmentFileName(receiptId: string, contentType: "image/jpeg" | "application/x-pdf" = "image/jpeg"): string {
+  return `fido-receipt-${receiptId}.${contentType === "application/x-pdf" ? "pdf" : "jpg"}`;
 }
 
 function moneyToMinorUnits(value: string): bigint | null {

@@ -115,7 +115,7 @@ type AttachmentPreview = {
     isLocked: boolean;
     existingAttachment: { fileName: string; fileSize: number } | null;
   } | null;
-  attachment: { fileName: string; fileSize: number; contentType: "image/jpeg" };
+  attachment: { fileName: string; fileSize: number; contentType: "image/jpeg" | "application/x-pdf" };
   blockers: string[];
   reconcileExisting: boolean;
   confirmationToken: string | null;
@@ -148,6 +148,7 @@ export function ReceiptMatching({
   const [sendingAttachment, setSendingAttachment] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [syncWarning, setSyncWarning] = useState<string | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const categoryRequestStarted = useRef(false);
 
@@ -155,16 +156,26 @@ export function ReceiptMatching({
     if (receipt.delivery) return;
     let active = true;
     const load = httpsCallable<{ receiptId: string }, MatchOptions>(functions, "getReceiptMatchOptions");
-    void load({ receiptId: receipt.id })
-      .then((response) => {
-        if (!active) return;
-        const next = response.data;
+    const sync = httpsCallable<void, unknown>(functions, "syncFreeAgentTransactions");
+    void (async () => {
+      const initial = await load({ receiptId: receipt.id });
+      let next = initial.data;
+      if (transactionsAreStale(next.lastSyncCompletedAt)) {
+        try {
+          await sync();
+          next = (await load({ receiptId: receipt.id })).data;
+        } catch {
+          if (active) setSyncWarning("Using the existing transaction cache because FreeAgent could not be refreshed. Connection controls are in Settings.");
+        }
+      }
+      if (active) {
         setOptions(next);
         const existingMode = next.existingProposal?.type;
         setMode(existingMode ?? "transaction");
         setSelectedTransactionId(next.existingProposal?.transaction?.id ?? next.suggestions[0]?.id ?? "");
         setSelectedCategoryUrl(next.existingProposal?.expense?.category.url ?? "");
-      })
+      }
+    })()
       .catch((cause) => active && setError(callableMessage(cause, "Matching options could not be loaded.")));
     return () => { active = false; };
   }, [receipt.delivery, receipt.id]);
@@ -298,9 +309,15 @@ export function ReceiptMatching({
           <aside className="matching-receipt">
             <div className="matching-image">
               {imageUrl ? (
-                // Object URLs are private, authenticated blobs and should not use Next's server image optimizer.
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={imageUrl} alt="Processed receipt" />
+                receipt.processedContentType === "application/pdf" ? (
+                  <object className="viewer-pdf" data={imageUrl} type="application/pdf" aria-label="Complete receipt PDF">
+                    <a href={imageUrl} download={receipt.originalFileName}>Open the complete PDF</a>
+                  </object>
+                ) : (
+                  // Object URLs are private, authenticated blobs and should not use Next's server image optimizer.
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={imageUrl} alt="Processed receipt" />
+                )
               ) : <span>Loading receipt…</span>}
             </div>
             <div className="matching-receipt-summary">
@@ -328,6 +345,7 @@ export function ReceiptMatching({
               />
             )}
             {attachmentError && <p className="message error" role="alert">{attachmentError}</p>}
+            {syncWarning && <p className="message error" role="status">{syncWarning}</p>}
             {!options && !error && !receipt.delivery ? <div className="matching-loading"><div className="spinner" /><p>Comparing recent transactions…</p></div> : null}
             {options ? (
               <>
@@ -398,7 +416,7 @@ export function ReceiptMatching({
                         {receipt.verifiedData.currency !== "GBP" && <div><dt>Final GBP amount</dt><dd>−{formatMoney(receipt.verifiedData.gbpAmountCharged ?? "", "GBP")}</dd></div>}
                         <div><dt>Description</dt><dd>{receipt.verifiedData.purchaseDescription}</dd></div>
                         <div><dt>VAT treatment</dt><dd>{receipt.verifiedData.currency !== "GBP" ? "No UK VAT" : receipt.verifiedData.vatTotal ? "Confirm in Stage 8" : "No VAT printed"}</dd></div>
-                        <div><dt>Attachment</dt><dd>Processed receipt JPEG</dd></div>
+                        <div><dt>Attachment</dt><dd>{receipt.processedContentType === "application/pdf" ? "Complete receipt PDF" : "Processed receipt JPEG"}</dd></div>
                       </dl>
                     )}
                   </div>
@@ -484,7 +502,7 @@ function AttachmentPanel({
           {preview.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}
         </ul>
       )}
-      <p className="attachment-assurance"><strong>Only the JPEG attachment will be sent.</strong> The existing category, date, description, amount and VAT treatment stay exactly as they are in FreeAgent.</p>
+      <p className="attachment-assurance"><strong>Only the receipt attachment will be sent.</strong> The existing category, date, description, amount and VAT treatment stay exactly as they are in FreeAgent.</p>
       {preview.state === "ready" && (
         <button className="attachment-confirm-button" type="button" onClick={onConfirm} disabled={sending || !preview.confirmationToken}>
           {sending ? "Attaching receipt…" : preview.reconcileExisting ? "Confirm existing attachment" : "Attach receipt to FreeAgent"}
@@ -513,6 +531,12 @@ function TransactionChoice({ transaction, selected, onSelect, compact = false }:
 
 function categoryLabel(nominalCode: string | null): string {
   return nominalCode ? `FreeAgent category ${nominalCode}` : "Existing FreeAgent category";
+}
+
+function transactionsAreStale(lastSyncCompletedAt: string | null): boolean {
+  if (!lastSyncCompletedAt) return true;
+  const completedAt = new Date(lastSyncCompletedAt).getTime();
+  return !Number.isFinite(completedAt) || Date.now() - completedAt > 6 * 60 * 60 * 1000;
 }
 
 function formatBytes(bytes: number): string {

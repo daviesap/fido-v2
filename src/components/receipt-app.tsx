@@ -22,6 +22,7 @@ import {
   type StorageReference,
 } from "firebase/storage";
 import { useAuth } from "@/components/auth-provider";
+import { DocumentReview } from "@/components/document-review";
 import { ReceiptReview } from "@/components/receipt-review";
 import { ReceiptVerification } from "@/components/receipt-verification";
 import { ReceiptMatching } from "@/components/receipt-matching";
@@ -32,6 +33,8 @@ import {
   displayStoragePath,
   formatBytes,
   hasProcessedAsset,
+  hasSeparateProcessedAsset,
+  isPdfAsset,
   receiptQueue,
   receiptStatusLabel,
   receiptContentType,
@@ -50,22 +53,25 @@ type ReadyToVerifyReceipt = Extract<Receipt, { status: "ready_for_extraction" }>
   extraction: ReadyForVerificationExtraction;
 };
 type VerifiedReceipt = Extract<Receipt, { status: "verified" }>;
-type ReceiptFilter = "all" | ReceiptQueue;
+type ReceiptFilter = "to_do" | "all" | ReceiptQueue;
 
 const RECEIPT_FILTERS: { value: ReceiptFilter; label: string }[] = [
-  { value: "all", label: "All" },
+  { value: "to_do", label: "To do" },
   { value: "needs_review", label: "Needs review" },
-  { value: "extracting", label: "Extracting" },
   { value: "ready_to_verify", label: "Ready to verify" },
   { value: "ready_to_match", label: "Ready to match" },
   { value: "proposed", label: "Proposals" },
-  { value: "sent", label: "Sent" },
   { value: "problems", label: "Problems" },
+  { value: "extracting", label: "Extracting" },
+  { value: "sent", label: "Sent" },
 ];
+
+const TO_DO_QUEUES = new Set<ReceiptQueue>(["needs_review", "ready_to_verify", "ready_to_match", "proposed", "problems"]);
 
 export function ReceiptApp() {
   const { user, signOut } = useAuth();
-  const inputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -77,10 +83,15 @@ export function ReceiptApp() {
   const [reviewTarget, setReviewTarget] = useState<ReviewTarget | null>(null);
   const [openingReviewId, setOpeningReviewId] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
-  const [filter, setFilter] = useState<ReceiptFilter>("all");
+  const [filter, setFilter] = useState<ReceiptFilter>("to_do");
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [emailCopied, setEmailCopied] = useState(false);
   const receiptEmailAddress = process.env.NEXT_PUBLIC_RECEIPT_EMAIL_ADDRESS ?? "receipts@flair.london";
-  const filteredReceipts = filter === "all" ? receipts : receipts.filter((receipt) => receiptQueue(receipt) === filter);
+  const filteredReceipts = filter === "all"
+    ? receipts
+    : filter === "to_do"
+      ? receipts.filter((receipt) => TO_DO_QUEUES.has(receiptQueue(receipt)))
+      : receipts.filter((receipt) => receiptQueue(receipt) === filter);
 
   useEffect(() => {
     if (!user) return;
@@ -106,7 +117,8 @@ export function ReceiptApp() {
     }
     setMessage(null);
     setReviewTarget({ file });
-    if (inputRef.current) inputRef.current.value = "";
+    if (cameraInputRef.current) cameraInputRef.current.value = "";
+    if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
   async function uploadReviewedReceipt(processed: ProcessedReceiptImage) {
@@ -212,6 +224,58 @@ export function ReceiptApp() {
     }
   }
 
+  async function approveCompletePdf(pageCount: number) {
+    const target = reviewTarget;
+    const file = target?.file;
+    if (!target || !file || receiptContentType(file) !== "application/pdf" || !user) return;
+    const receiptId = target.receipt?.id ?? crypto.randomUUID();
+    const storagePath = target.receipt?.storagePath ?? `receipts/${user.uid}/${receiptId}/original-${safeFileName(file.name)}`;
+    const completePdfFields = {
+      status: "ready_for_extraction",
+      processedStoragePath: storagePath,
+      processedContentType: "application/pdf",
+      processedSize: file.size,
+      processing: {
+        version: PROCESSING_VERSION,
+        mode: "document",
+        pageCount,
+        processedAt: serverTimestamp(),
+      },
+    } as const;
+
+    if (target.receipt) {
+      await updateDoc(doc(db, "receipts", receiptId), { ...completePdfFields, reviewedAt: serverTimestamp() });
+    } else {
+      const originalRef = ref(storage, storagePath);
+      setUploading(true);
+      setProgress(0);
+      try {
+        await uploadObject(originalRef, file, {
+          contentType: "application/pdf",
+          receiptId,
+          ownerUid: user.uid,
+          assetType: "original",
+        }, (transferred) => setProgress(Math.round((transferred / file.size) * 100)));
+        await setDoc(doc(db, "receipts", receiptId), {
+          ownerUid: user.uid,
+          storagePath,
+          originalFileName: file.name,
+          contentType: "application/pdf",
+          size: file.size,
+          ...completePdfFields,
+          createdAt: serverTimestamp(),
+        });
+      } catch (cause) {
+        await deleteObject(originalRef).catch(() => undefined);
+        throw cause;
+      } finally {
+        setUploading(false);
+      }
+    }
+    setReviewTarget(null);
+    setMessage({ text: `Complete ${pageCount}-page PDF queued for extraction.` });
+  }
+
   async function copyReceiptEmail() {
     try {
       await navigator.clipboard.writeText(receiptEmailAddress);
@@ -227,19 +291,19 @@ export function ReceiptApp() {
       setMessage({ text: "This receipt is attached in FreeAgent and is retained with its delivery audit.", error: true });
       return;
     }
-    if (!window.confirm(`Delete ${receipt.originalFileName}? This removes the original and processed image and cannot be undone.`)) return;
+    if (!window.confirm(`Delete ${receipt.originalFileName}? This removes the stored receipt and cannot be undone.`)) return;
     setMessage(null);
     try {
-      const paths = [receipt.storagePath];
-      if (hasProcessedAsset(receipt)) paths.push(receipt.processedStoragePath);
-      await Promise.all(paths.map((path) => deleteObject(ref(storage, path)).catch((error: unknown) => {
+      const paths = new Set([receipt.storagePath]);
+      if (hasProcessedAsset(receipt)) paths.add(receipt.processedStoragePath);
+      await Promise.all(Array.from(paths).map((path) => deleteObject(ref(storage, path)).catch((error: unknown) => {
         if ((error as { code?: string }).code !== "storage/object-not-found") throw error;
       })));
       await deleteDoc(doc(db, "receipts", receipt.id));
       if (selected?.id === receipt.id) setSelected(null);
       if (verificationTarget?.id === receipt.id) setVerificationTarget(null);
       if (matchingTarget?.id === receipt.id) setMatchingTarget(null);
-      setMessage({ text: "Receipt and its derived image deleted." });
+      setMessage({ text: "Receipt deleted." });
     } catch (error) {
       setMessage({ text: error instanceof Error ? error.message : "Delete failed.", error: true });
     }
@@ -284,48 +348,42 @@ export function ReceiptApp() {
     <div className="app-shell">
       <header className="topbar">
         <div className="brand"><span className="brand-mark">F</span><span>Fido</span></div>
-        <button className="text-button" onClick={() => void signOut()}>Sign out</button>
+        <button className="settings-button" type="button" onClick={() => setSettingsOpen(true)}>
+          <span aria-hidden="true">⚙</span> Settings
+        </button>
       </header>
       <main className="page">
-        <section className="intro">
-          <p className="eyebrow">Stage eight · reviewed delivery</p>
-          <h1>Receipts ready to reconcile.</h1>
-          <p>Fido ranks likely FreeAgent transactions, then attaches a receipt only after a separate live preview and your explicit confirmation.</p>
-        </section>
-
-        <FreeAgentConnectionCard />
-
-        <section className="email-receipt-card">
-          <div>
-            <p className="eyebrow light">Email a receipt</p>
-            <h2>Forward attachments straight to Fido.</h2>
-            <p>Send a PDF, image, or readable receipt email. It will arrive below as <strong>Needs review</strong>; raw email markup and signatures are not retained.</p>
-          </div>
-          <button type="button" onClick={() => void copyReceiptEmail()}>
-            <span>{receiptEmailAddress}</span>
-            <strong>{emailCopied ? "Copied" : "Copy"}</strong>
-          </button>
-        </section>
-
         <section className="upload-card">
           <div className="upload-copy">
             <p className="eyebrow light">New receipt</p>
-            <h2>{uploading ? "Saving both versions…" : "Photograph it before it disappears."}</h2>
-            <p>Keep the full receipt in frame, or upload a digital copy. PDF, JPEG, PNG, WebP and HEIC files up to 20 MB are accepted.</p>
+            <h1>{uploading ? "Saving your receipt…" : "Photograph a receipt."}</h1>
+            <p>Keep the whole receipt in frame. You can also choose an existing photo or PDF.</p>
           </div>
           <input
-            ref={inputRef}
+            ref={cameraInputRef}
             className="visually-hidden"
-            id="receipt-file"
+            id="receipt-camera"
             type="file"
-            accept="application/pdf,image/jpeg,image/png,image/webp,image/heic,image/heif,.pdf,.heic,.heif"
+            accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif"
             capture="environment"
             disabled={uploading}
             onChange={(event) => selectFile(event.target.files?.[0])}
           />
-          <label className={`upload-button ${uploading ? "disabled" : ""}`} htmlFor="receipt-file">
-            <span aria-hidden="true">◎</span>{uploading ? `${progress}% saved` : "Scan a receipt"}
-          </label>
+          <input
+            ref={fileInputRef}
+            className="visually-hidden"
+            id="receipt-file"
+            type="file"
+            accept="application/pdf,image/jpeg,image/png,image/webp,image/heic,image/heif,.pdf,.heic,.heif"
+            disabled={uploading}
+            onChange={(event) => selectFile(event.target.files?.[0])}
+          />
+          <div className="upload-actions">
+            <label className={`upload-button camera-upload ${uploading ? "disabled" : ""}`} htmlFor="receipt-camera">
+              <span aria-hidden="true">◎</span>{uploading ? `${progress}% saved` : "Photograph receipt"}
+            </label>
+            <label className={`upload-secondary ${uploading ? "disabled" : ""}`} htmlFor="receipt-file">Choose photo or PDF</label>
+          </div>
           {uploading && <div className="progress"><span style={{ width: `${progress}%` }} /></div>}
         </section>
 
@@ -333,12 +391,15 @@ export function ReceiptApp() {
 
         <section className="library">
           <div className="library-heading">
-            <div><p className="eyebrow">Review queue</p><h2>Your receipts</h2></div>
+            <div><p className="eyebrow">Receipt queue</p><h2>Receipts</h2></div>
             <span className="count">{receipts.length}</span>
           </div>
           <div className="receipt-filters" aria-label="Filter receipts">
             {RECEIPT_FILTERS.map((item) => {
-              const count = item.value === "all" ? receipts.length : receipts.filter((receipt) => receiptQueue(receipt) === item.value).length;
+              const count = item.value === "to_do"
+                ? receipts.filter((receipt) => TO_DO_QUEUES.has(receiptQueue(receipt))).length
+                : receipts.filter((receipt) => receiptQueue(receipt) === item.value).length;
+              if (count === 0 && filter !== item.value && item.value !== "to_do") return null;
               return (
                 <button
                   key={item.value}
@@ -350,6 +411,11 @@ export function ReceiptApp() {
                 </button>
               );
             })}
+            <button
+              type="button"
+              className={`all-receipts ${filter === "all" ? "active" : ""}`}
+              onClick={() => setFilter("all")}
+            >All receipts <span>{receipts.length}</span></button>
           </div>
           {loading ? <div className="loading"><div className="spinner" /></div> : receipts.length === 0 ? (
             <div className="empty"><span>02</span><h3>No receipts yet</h3><p>Your first reviewed upload will appear here.</p></div>
@@ -375,9 +441,27 @@ export function ReceiptApp() {
           )}
         </section>
       </main>
-      {reviewTarget && (
-        <ReceiptReview file={reviewTarget.file} onCancel={() => setReviewTarget(null)} onApprove={(result) => void uploadReviewedReceipt(result)} />
+      {settingsOpen && (
+        <div className="settings-backdrop" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}>
+          <aside className="settings-drawer">
+            <header className="settings-heading">
+              <div><p className="eyebrow">Fido</p><h2 id="settings-title">Settings</h2></div>
+              <button className="text-button" type="button" onClick={() => setSettingsOpen(false)}>Close</button>
+            </header>
+            <section className="settings-email">
+              <div><strong>Receipt email</strong><span>{receiptEmailAddress}</span></div>
+              <button className="secondary-button" type="button" onClick={() => void copyReceiptEmail()}>{emailCopied ? "Copied" : "Copy"}</button>
+            </section>
+            <FreeAgentConnectionCard />
+            <button className="settings-signout" type="button" onClick={() => void signOut()}>Sign out of Fido</button>
+          </aside>
+        </div>
       )}
+      {reviewTarget && receiptContentType(reviewTarget.file) === "application/pdf" ? (
+        <DocumentReview file={reviewTarget.file} onCancel={() => setReviewTarget(null)} onApprove={approveCompletePdf} />
+      ) : reviewTarget ? (
+        <ReceiptReview file={reviewTarget.file} onCancel={() => setReviewTarget(null)} onApprove={(result) => void uploadReviewedReceipt(result)} />
+      ) : null}
       {verificationTarget && (
         <ReceiptVerification
           key={verificationTarget.id}
@@ -473,7 +557,8 @@ function ReceiptCard({
 }) {
   const needsReview = receipt.status === "needs_review";
   const queue = receiptQueue(receipt);
-  const { url, failed } = useReceiptImage(needsReview && receipt.contentType === "application/pdf" ? null : displayStoragePath(receipt));
+  const pdfAsset = isPdfAsset(receipt);
+  const { url, failed } = useReceiptImage(pdfAsset ? null : displayStoragePath(receipt));
   const date = (receipt.createdAt as { toDate?: () => Date } | null)?.toDate?.();
   const extracted = receipt.status === "ready_for_extraction" && receipt.extraction?.state === "ready_for_verification"
     ? receipt.extraction.result
@@ -484,8 +569,8 @@ function ReceiptCard({
   return (
     <article className="receipt-card">
       <button className="receipt-preview" onClick={onOpen} aria-label={`View ${receipt.originalFileName}`} disabled={opening}>
-        {needsReview && receipt.contentType === "application/pdf" ? (
-          <span className="pdf-placeholder"><strong>PDF</strong>{opening ? "Opening…" : "Ready to review"}</span>
+        {pdfAsset ? (
+          <span className="pdf-placeholder"><strong>PDF</strong>{opening ? "Opening…" : needsReview ? "Ready to review" : "Complete document"}</span>
         ) : url ? (
           // Object URLs are private, authenticated blobs and should not use Next's server image optimizer.
           // eslint-disable-next-line @next/next/no-img-element
@@ -562,9 +647,9 @@ function formatReceiptDate(value: string | null): string {
 }
 
 function ReceiptViewer({ receipt, onClose, onDelete }: { receipt: Receipt; onClose(): void; onDelete(): void }) {
-  const canShowProcessed = hasProcessedAsset(receipt);
+  const canShowProcessed = hasSeparateProcessedAsset(receipt);
   const [showOriginal, setShowOriginal] = useState(!canShowProcessed);
-  const showingProcessed = hasProcessedAsset(receipt) && !showOriginal;
+  const showingProcessed = hasProcessedAsset(receipt) && canShowProcessed && !showOriginal;
   const path = showingProcessed ? receipt.processedStoragePath : receipt.storagePath;
   const { url, failed } = useReceiptImage(path);
   const shownType = showingProcessed ? receipt.processedContentType : receipt.contentType;
@@ -585,7 +670,7 @@ function ReceiptViewer({ receipt, onClose, onDelete }: { receipt: Receipt; onClo
         </div>
         <div className="viewer-image">
           {url ? (
-            !showingProcessed && receipt.contentType === "application/pdf" ? (
+            shownType === "application/pdf" ? (
               <object className="viewer-pdf" data={url} type="application/pdf" aria-label={`Original ${receipt.originalFileName}`}>
                 <a href={url} download={receipt.originalFileName}>Download the original PDF</a>
               </object>
