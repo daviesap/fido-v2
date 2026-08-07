@@ -10,7 +10,7 @@ Suggestions require all of the following:
 
 - a purchase/debit transaction;
 - an exact GBP amount, using the receipt gross total for GBP receipts or the owner-entered final GBP charge for foreign receipts;
-- a transaction date no more than three days from the receipt date.
+- a transaction date no more than a month (30 days) from the receipt date.
 
 The score is deterministic and totals 100 points:
 
@@ -25,7 +25,7 @@ The UI shows every factor and never auto-confirms a result. Transactions outside
 When a non-GBP receipt has no final GBP charge entered yet, the verification screen can request up to three likely debits from the private transaction cache. This fallback requires:
 
 - a strong merchant-name similarity;
-- a transaction date within three days;
+- a transaction date within a month (30 days);
 - a GBP debit inside a deliberately broad plausibility band for the printed currency and total.
 
 The bands are only a deterministic sanity check and are not presented or stored as exchange rates. Choosing a suggestion copies the transaction's actual GBP debit into **GBP amount charged**; the owner still verifies the receipt normally. Unsupported currencies and weak candidates fall back to manual entry.
