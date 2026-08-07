@@ -236,6 +236,30 @@ describe("FreeAgent OAuth", () => {
     }]);
   });
 
+  it("decodes HTML entities in transaction descriptions", async () => {
+    const fetchImpl = async () => new Response(JSON.stringify({ bank_transactions: [{
+      url: "https://api.freeagent.com/v2/bank_transactions/9",
+      amount: "-154.80",
+      bank_account: "https://api.freeagent.com/v2/bank_accounts/1",
+      dated_on: "2026-08-05",
+      description: "Gcrecwf&amp;partners (Direct Debit)/N&#39;Co",
+      full_description: "Gcrecwf&amp;partners (Direct Debit)/N&#39;Co",
+      unexplained_amount: "-154.80",
+      transaction_id: null,
+      updated_at: "2026-08-05T09:00:00Z",
+    }] }), { status: 200, headers: { "content-type": "application/json", "x-total-count": "1" } });
+
+    const transactions = await fetchFreeAgentBankTransactions({
+      accessToken: "access",
+      bankAccountUrl: "https://api.freeagent.com/v2/bank_accounts/1",
+      fromDate: "2026-05-03",
+      toDate: "2026-08-01",
+      fetchImpl,
+    });
+    expect(transactions[0]?.description).toBe("Gcrecwf&partners (Direct Debit)/N'Co");
+    expect(transactions[0]?.fullDescription).toBe("Gcrecwf&partners (Direct Debit)/N'Co");
+  });
+
   it("reads and updates only an existing explanation attachment", async () => {
     const requests: { url: string; init?: RequestInit }[] = [];
     const explanation = {

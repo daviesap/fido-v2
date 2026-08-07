@@ -461,6 +461,27 @@ function normaliseBankAccount(account: z.infer<typeof BankAccountSchema>) {
   };
 }
 
+const HTML_ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: "\"",
+  apos: "'",
+  "#39": "'",
+  nbsp: " ",
+};
+
+// FreeAgent's bank feed descriptions sometimes arrive HTML-escaped (e.g. "&amp;" for "&").
+function decodeHtmlEntities(value: string): string {
+  return value.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+\d*);/gi, (entity, code: string) => {
+    if (code[0] === "#") {
+      const codePoint = code[1]?.toLowerCase() === "x" ? parseInt(code.slice(2), 16) : parseInt(code.slice(1), 10);
+      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : entity;
+    }
+    return HTML_ENTITIES[code.toLowerCase()] ?? entity;
+  });
+}
+
 function normaliseBankTransaction(transaction: z.infer<typeof BankTransactionSchema>) {
   return {
     id: freeAgentResourceId(transaction.url, "bank_transactions"),
@@ -469,8 +490,8 @@ function normaliseBankTransaction(transaction: z.infer<typeof BankTransactionSch
     bankAccountUrl: transaction.bank_account,
     datedOn: transaction.dated_on,
     amount: transaction.amount,
-    description: transaction.description,
-    fullDescription: transaction.full_description,
+    description: decodeHtmlEntities(transaction.description),
+    fullDescription: decodeHtmlEntities(transaction.full_description),
     unexplainedAmount: transaction.unexplained_amount,
     transactionId: transaction.transaction_id ?? null,
     updatedAt: transaction.updated_at,
@@ -482,7 +503,7 @@ function normaliseBankTransaction(transaction: z.infer<typeof BankTransactionSch
         type: explanation.type ?? "Existing explanation",
         categoryUrl: explanation.category ?? null,
         datedOn: explanation.dated_on ?? null,
-        description: explanation.description ?? "",
+        description: decodeHtmlEntities(explanation.description ?? ""),
         grossValue: explanation.gross_value ?? null,
         updatedAt: explanation.updated_at ?? null,
         isLocked: explanation.is_locked ?? null,
