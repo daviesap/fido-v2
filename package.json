@@ -29,7 +29,7 @@
     "@types/node": "22.19.11",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
-    "eslint": "9.39.2",
+    "eslint": "10.9.1",
     "eslint-config-next": "16.2.12",
     "firebase-admin": "14.2.0",
     "firebase-tools": "15.24.0",
