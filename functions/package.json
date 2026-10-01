@@ -13,12 +13,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@firebase/app": "^0.16.0",
-    "@firebase/app-compat": "^0.5.16",
-    "firebase-admin": "^14.2.0",
-    "firebase-functions": "^7.0.0",
-    "openai": "7.3.0",
-    "zod": "^4.3.6"
+    "@firebase/app": "^0.16.2",
+    "@firebase/app-compat": "^0.5.18",
+    "firebase-admin": "^14.5.0",
+    "firebase-functions": "^7.4.0",
+    "openai": "7.23.0",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/node": "^22.19.11",
