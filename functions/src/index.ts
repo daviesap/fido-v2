@@ -1035,11 +1035,13 @@ async function receiptAttachmentContext(ownerUid: string, receiptId: string, dra
   }
   let transaction = proposal.get("transaction") as Record<string, unknown> | undefined;
   if (draft?.transactionId) {
-    const [source, proposals] = await Promise.all([
-      freeAgentTransactionsRef(ownerUid).doc(draft.transactionId).get(),
+    const [transactions, proposals] = await Promise.all([
+      freeAgentTransactionsRef(ownerUid).get(),
       freeAgentMatchProposalsRef(ownerUid).get(),
     ]);
-    if (!source.exists) throw new HttpsError("not-found", "That transaction is no longer available.");
+    // Cache document IDs hash the URL; the public transaction ID is a field.
+    const source = transactions.docs.find((document) => document.get("id") === draft.transactionId);
+    if (!source) throw new HttpsError("not-found", "That transaction is no longer available.");
     if (proposals.docs.some((item) => item.id !== receiptId && item.get("type") === "transaction" && item.get("transaction.id") === draft.transactionId)) {
       throw new HttpsError("already-exists", "That transaction is already used by another receipt.");
     }

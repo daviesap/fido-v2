@@ -64,7 +64,7 @@ beforeEach(() => {
   process.env.FIDO_V2_FREEAGENT_TOKEN_ENCRYPTION_KEY = "test-only-key";
   fake.documents.set(receiptPath, { ownerUid: owner, status: "ready_for_extraction", storagePath: `receipts/${owner}/receipt/original.jpg`, processedStoragePath: `receipts/${owner}/receipt/processed-v1.jpg`, processedContentType: "image/jpeg", processedSize: 10, extraction: { state: "ready_for_verification" } });
   fake.documents.set(`freeAgentConnections/${owner}`, { status: "connected", accessToken: { data: "test" }, accessTokenExpiresAt: Timestamp.fromMillis(Date.now() + 3600000) });
-  fake.documents.set(`${syncPath}/transactions/bank`, { ...bankTransaction, bankAccountName: "Business", currency: "GBP", fullDescription: "SHOP" });
+  fake.documents.set(`${syncPath}/transactions/hashed-cache-document-id`, { ...bankTransaction, bankAccountName: "Business", currency: "GBP", fullDescription: "SHOP" });
   fake.fetchTransaction.mockResolvedValue(bankTransaction);
   fake.fetchExplanation.mockResolvedValue(explanation);
   fake.updateAttachment.mockImplementation(async () => {
