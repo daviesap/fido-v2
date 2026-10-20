@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { loadPdfReceipt, renderPdfReceiptPage } from "@/lib/pdf-processing";
 import { formatBytes } from "@/lib/receipt";
@@ -14,6 +14,8 @@ export function DocumentReview({
   onApprove(pageCount: number): Promise<void>;
   onCancel(): void;
 }) {
+  const approveRef = useRef(onApprove);
+  useEffect(() => { approveRef.current = onApprove; }, [onApprove]);
   const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
   const [pageCount, setPageCount] = useState(0);
   const [pageNumber, setPageNumber] = useState(1);
@@ -29,6 +31,18 @@ export function DocumentReview({
     void loadPdfReceipt(file)
       .then(async (loaded) => {
         opened = loaded.document;
+        if (!active) return;
+        setDocument(loaded.document);
+        setPageCount(loaded.pageCount);
+        try {
+          setSaving(true);
+          await approveRef.current(loaded.pageCount);
+        } catch (cause) {
+          if (active) setError(cause instanceof Error ? cause.message : "The PDF could not be queued. Try again.");
+        } finally {
+          if (active) setSaving(false);
+        }
+        if (!active) return;
         const rendered = await renderPdfReceiptPage(loaded.document, 1);
         if (!active) return;
         setDocument(loaded.document);

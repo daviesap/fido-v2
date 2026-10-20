@@ -4,9 +4,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { httpsCallable } from "firebase/functions";
 import { getBlob, ref } from "firebase/storage";
 import { functions, storage } from "@/lib/firebase";
-import type { Receipt } from "@/lib/receipt";
+import { ReceiptVerification } from "@/components/receipt-verification";
+import { QUALITY_WARNING_MESSAGES } from "@/lib/image-processing";
+import type { Receipt, ReadyForVerificationExtraction, VerifiedReceiptValues } from "@/lib/receipt";
 
 type VerifiedReceipt = Extract<Receipt, { status: "verified" }>;
+export type ReviewReceipt = VerifiedReceipt | (Extract<Receipt, { status: "ready_for_extraction" }> & { extraction: ReadyForVerificationExtraction });
 type MatchMode = "transaction" | "out_of_pocket" | "unmatched";
 
 type RankedTransaction = {
@@ -129,11 +132,23 @@ export function ReceiptMatching({
   receipt,
   onClose,
   onSaved,
+  onComplete,
+  onAdjustImage,
 }: {
-  receipt: VerifiedReceipt;
+  receipt: ReviewReceipt;
   onClose(): void;
   onSaved(message: string): void;
+  onComplete(): void;
+  onAdjustImage(): void;
 }) {
+  const [values, setValues] = useState<VerifiedReceiptValues | null>(null);
+  const valuesKey = JSON.stringify(values);
+  const delivered = receipt.status === "verified" && !!receipt.delivery;
+  const displayValues = values ?? (receipt.status === "verified" ? receipt.verifiedData : { ...receipt.extraction.result, gbpAmountCharged: null });
+  const [optionsKey, setOptionsKey] = useState("");
+  const [previewKey, setPreviewKey] = useState("");
+  const [previewRefresh, setPreviewRefresh] = useState(0);
+  const initialModeLoaded = useRef(false);
   const [options, setOptions] = useState<MatchOptions | null>(null);
   const [mode, setMode] = useState<MatchMode>("transaction");
   const [selectedTransactionId, setSelectedTransactionId] = useState("");
@@ -144,7 +159,7 @@ export function ReceiptMatching({
   const [loadingCategories, setLoadingCategories] = useState(false);
   const [saving, setSaving] = useState(false);
   const [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreviewResponse | null>(null);
-  const [loadingAttachment, setLoadingAttachment] = useState(true);
+
   const [sendingAttachment, setSendingAttachment] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -153,43 +168,57 @@ export function ReceiptMatching({
   const categoryRequestStarted = useRef(false);
 
   useEffect(() => {
-    if (receipt.delivery) return;
+    if (delivered || valuesKey === "null") return;
     let active = true;
-    const load = httpsCallable<{ receiptId: string }, MatchOptions>(functions, "getReceiptMatchOptions");
-    const sync = httpsCallable<void, unknown>(functions, "syncFreeAgentTransactions");
-    void (async () => {
-      const initial = await load({ receiptId: receipt.id });
-      let next = initial.data;
+    const timer = setTimeout(() => { void (async () => {
+      setError(null);
+      const load = httpsCallable(functions, "getReceiptMatchOptions");
+      const payload = { receiptId: receipt.id, values: JSON.parse(valuesKey) };
+      let next = (await load(payload)).data as MatchOptions;
       if (transactionsAreStale(next.lastSyncCompletedAt)) {
         try {
-          await sync();
-          next = (await load({ receiptId: receipt.id })).data;
+          await httpsCallable(functions, "syncFreeAgentTransactions")();
+          next = (await load(payload)).data as MatchOptions;
         } catch {
-          if (active) setSyncWarning("Using the existing transaction cache because FreeAgent could not be refreshed. Connection controls are in Settings.");
+          if (active) setSyncWarning("Using saved transactions because FreeAgent could not be refreshed. Connection controls are in Settings.");
         }
       }
-      if (active) {
-        setOptions(next);
-        const existingMode = next.existingProposal?.type;
-        setMode(existingMode ?? "transaction");
-        setSelectedTransactionId(next.existingProposal?.transaction?.id ?? next.suggestions[0]?.id ?? "");
+      if (!active) return;
+      setOptions(next);
+      setOptionsKey(valuesKey);
+      setSelectedTransactionId((current) => {
+        const available = [...next.suggestions, ...next.otherTransactions];
+        return available.some((item) => item.id === current) ? current
+          : next.existingProposal?.transaction?.id ?? next.suggestions[0]?.id ?? "";
+      });
+      if (!initialModeLoaded.current) {
+        setMode(next.existingProposal?.type ?? "transaction");
         setSelectedCategoryUrl(next.existingProposal?.expense?.category.url ?? "");
+        initialModeLoaded.current = true;
       }
-    })()
-      .catch((cause) => active && setError(callableMessage(cause, "Matching options could not be loaded.")));
-    return () => { active = false; };
-  }, [receipt.delivery, receipt.id]);
+    })().catch((cause) => active && setError(callableMessage(cause, "Matching options could not be loaded."))); }, 400);
+    return () => { active = false; clearTimeout(timer); };
+  }, [delivered, receipt.id, valuesKey]);
 
+  const currentPreviewKey = JSON.stringify([valuesKey, selectedTransactionId, mode, previewRefresh]);
+  const optionsCurrent = optionsKey === valuesKey && !!values;
+  const previewCurrent = previewKey === currentPreviewKey;
   useEffect(() => {
-    if (!receipt.delivery && (!options?.existingProposal || options.existingProposal.type !== "transaction")) return;
+    if (!delivered && (!optionsCurrent || mode !== "transaction" || !selectedTransactionId)) return;
     let active = true;
-    const load = httpsCallable<{ receiptId: string }, AttachmentPreviewResponse>(functions, "getReceiptAttachmentPreview");
-    void load({ receiptId: receipt.id })
-      .then((response) => active && setAttachmentPreview(response.data))
-      .catch((cause) => active && setAttachmentError(callableMessage(cause, "The FreeAgent attachment preview could not be loaded.")))
-      .finally(() => active && setLoadingAttachment(false));
-    return () => { active = false; };
-  }, [options?.existingProposal, receipt.delivery, receipt.id]);
+    const timer = setTimeout(() => {
+      setAttachmentError(null);
+      void httpsCallable(functions, "getReceiptAttachmentPreview")({
+        receiptId: receipt.id,
+        ...(!delivered ? { values: JSON.parse(valuesKey), transactionId: selectedTransactionId } : {}),
+      }).then((response) => {
+        if (!active) return;
+        setAttachmentPreview(response.data as AttachmentPreviewResponse);
+        setPreviewKey(currentPreviewKey);
+      }).catch((cause) => active && setAttachmentError(callableMessage(cause, "The FreeAgent attachment preview could not be loaded.")));
+    }, 250);
+    return () => { active = false; clearTimeout(timer); };
+  }, [delivered, optionsCurrent, mode, selectedTransactionId, receipt.id, valuesKey, currentPreviewKey]);
 
   useEffect(() => {
     let active = true;
@@ -240,6 +269,7 @@ export function ReceiptMatching({
     ?? null;
 
   async function saveProposal() {
+    if (!values || !optionsCurrent) return;
     let request: SaveRequest;
     if (mode === "transaction") {
       if (!selectedTransactionId) {
@@ -260,8 +290,8 @@ export function ReceiptMatching({
     setSaving(true);
     setError(null);
     try {
-      const save = httpsCallable<SaveRequest, SaveResponse>(functions, "saveReceiptMatchProposal");
-      await save(request);
+      const save = httpsCallable<SaveRequest & { values: VerifiedReceiptValues }, SaveResponse>(functions, "saveReceiptMatchProposal");
+      await save({ ...request, values });
       onSaved(mode === "transaction"
         ? "Transaction proposal saved. Nothing has been changed in FreeAgent."
         : mode === "out_of_pocket"
@@ -276,33 +306,35 @@ export function ReceiptMatching({
   }
 
   async function confirmAttachment() {
-    if (!attachmentPreview || attachmentPreview.state !== "ready" || !attachmentPreview.confirmationToken) return;
+    if (!optionsCurrent || !previewCurrent || mode !== "transaction" || !attachmentPreview || attachmentPreview.state !== "ready" || !attachmentPreview.confirmationToken) return;
     setSendingAttachment(true);
     setAttachmentError(null);
     try {
       const confirm = httpsCallable<{ receiptId: string; confirmationToken: string }, AttachmentConfirmResponse>(functions, "confirmReceiptAttachment");
       const response = await confirm({ receiptId: receipt.id, confirmationToken: attachmentPreview.confirmationToken });
       setAttachmentPreview({ state: "sent", delivery: response.data.delivery, writeEnabled: true });
-      onSaved("Receipt attached to the existing FreeAgent explanation. Its accounting category and amounts were unchanged.");
+      onSaved("Receipt sent to FreeAgent.");
+      onComplete();
     } catch (cause) {
       setAttachmentError(callableMessage(cause, "The receipt could not be attached to FreeAgent."));
+      setPreviewRefresh((current) => current + 1);
     } finally {
       setSendingAttachment(false);
     }
   }
 
-  const attachmentSent = attachmentPreview?.state === "sent";
+  const attachmentSent = delivered || attachmentPreview?.state === "sent";
 
   return (
     <div className="matching-backdrop" role="dialog" aria-modal="true" aria-labelledby="matching-title">
       <div className="matching-dialog">
         <header className="review-header">
           <div>
-            <p className="eyebrow">{attachmentSent ? "Stage eight · sent" : "Stage eight · preview, then confirm"}</p>
-            <h2 id="matching-title">Match the money, then the merchant.</h2>
-            <p>{receipt.verifiedData.merchantName} · {formatReceiptDate(receipt.verifiedData.receiptDate)}</p>
+            <p className="eyebrow">{attachmentSent ? "Sent" : "Review & send"}</p>
+            <h2 id="matching-title">Review your receipt.</h2>
+            <p>{displayValues.merchantName} · {formatReceiptDate(displayValues.receiptDate ?? "")}</p>
           </div>
-          <button className="text-button" type="button" onClick={onClose}>Close</button>
+          <button className="text-button" type="button" onClick={onClose} disabled={sendingAttachment || saving}>Close</button>
         </header>
 
         <div className="matching-workspace">
@@ -320,38 +352,38 @@ export function ReceiptMatching({
                 )
               ) : <span>Loading receipt…</span>}
             </div>
+            {!delivered && receipt.processedContentType !== "application/pdf" && <button className="secondary-button" type="button" onClick={onAdjustImage} disabled={sendingAttachment || saving}>Adjust image</button>}
+            {!("mode" in receipt.processing) && receipt.processing.qualityWarnings.length > 0 && <div className="extraction-warnings"><strong>Check image quality</strong><ul>{receipt.processing.qualityWarnings.map((warning) => <li key={warning}>{QUALITY_WARNING_MESSAGES[warning]}</li>)}</ul></div>}
             <div className="matching-receipt-summary">
-              <p className="eyebrow">Verified receipt</p>
-              <h3>{receipt.verifiedData.merchantName}</h3>
-              <p>{receipt.verifiedData.purchaseDescription}</p>
+              <p className="eyebrow">Receipt</p>
+              <h3>{displayValues.merchantName}</h3>
+              <p>{displayValues.purchaseDescription}</p>
               <dl>
-                <div><dt>Date</dt><dd>{formatReceiptDate(receipt.verifiedData.receiptDate)}</dd></div>
-                <div><dt>Receipt total</dt><dd>{formatMoney(receipt.verifiedData.grossTotal, receipt.verifiedData.currency)}</dd></div>
-                {receipt.verifiedData.currency !== "GBP" && (
-                  <div><dt>GBP charged</dt><dd>{formatMoney(receipt.verifiedData.gbpAmountCharged ?? "", "GBP")}</dd></div>
+                <div><dt>Date</dt><dd>{formatReceiptDate(displayValues.receiptDate ?? "")}</dd></div>
+                <div><dt>Receipt total</dt><dd>{formatMoney(displayValues.grossTotal ?? "", displayValues.currency ?? "GBP")}</dd></div>
+                {displayValues.currency !== "GBP" && (
+                  <div><dt>GBP charged</dt><dd>{formatMoney(displayValues.gbpAmountCharged ?? "", "GBP")}</dd></div>
                 )}
-                <div><dt>VAT</dt><dd>{receipt.verifiedData.vatTotal ? formatMoney(receipt.verifiedData.vatTotal, "GBP") : "Not printed"}</dd></div>
+                <div><dt>VAT</dt><dd>{displayValues.vatTotal ? formatMoney(displayValues.vatTotal, "GBP") : "Not printed"}</dd></div>
               </dl>
             </div>
           </aside>
 
-          <section className="matching-panel">
-            {loadingAttachment && (receipt.delivery || options?.existingProposal?.type === "transaction") && <p className="attachment-loading">Checking the live FreeAgent explanation…</p>}
-            {attachmentPreview && (
-              <AttachmentPanel
-                preview={attachmentPreview}
-                sending={sendingAttachment}
-                onConfirm={() => void confirmAttachment()}
-              />
+          <fieldset className="matching-panel receipt-fields" disabled={sendingAttachment || saving}>
+            {!delivered && <ReceiptVerification receipt={receipt} onDraftChange={setValues} disabled={sendingAttachment || saving} />}
+            {!delivered && !values && <p className="message" role="status">Complete the receipt details, including any actual GBP charge. Net plus VAT should match the total.</p>}
+            {mode === "transaction" && optionsCurrent && !previewCurrent && selectedTransactionId && !attachmentError && <p role="status">Checking the live FreeAgent explanation…</p>}
+            {attachmentPreview && (previewCurrent || delivered) && (mode === "transaction" || delivered) && (
+              <AttachmentPanel preview={attachmentPreview} />
             )}
             {attachmentError && <p className="message error" role="alert">{attachmentError}</p>}
             {syncWarning && <p className="message error" role="status">{syncWarning}</p>}
-            {!options && !error && !receipt.delivery ? <div className="matching-loading"><div className="spinner" /><p>Comparing recent transactions…</p></div> : null}
-            {options ? (
+            {values && !optionsCurrent && !error && !delivered ? <div className="matching-loading"><div className="spinner" /><p>Comparing recent transactions…</p></div> : null}
+            {options && optionsCurrent ? (
               <>
                 {!attachmentSent && <>
                 {options.existingProposal && (
-                  <p className="proposal-existing">A proposal is already saved. Saving below will replace it; FreeAgent remains unchanged.</p>
+                  <p className="proposal-existing">A previous choice is saved. Review it below before sending.</p>
                 )}
                 <div className="matching-modes" role="tablist" aria-label="Receipt treatment">
                   <button type="button" role="tab" aria-selected={mode === "transaction"} className={mode === "transaction" ? "active" : ""} onClick={() => setMode("transaction")}>Bank transaction</button>
@@ -393,7 +425,7 @@ export function ReceiptMatching({
                 {mode === "out_of_pocket" && (
                   <div className="match-choice-panel">
                     <p className="eyebrow">Out-of-pocket expense</p>
-                    <h3>Prepare it—don’t send it.</h3>
+                    <h3>Save an expense proposal.</h3>
                     <p className="matching-explanation">Choose the accounting category yourself. Fido and OpenAI will never guess it.</p>
                     {loadingCategories ? <p>Loading current FreeAgent categories…</p> : categories ? (
                       <label className="category-picker">FreeAgent spending category
@@ -411,11 +443,11 @@ export function ReceiptMatching({
                     {selectedCategory && (
                       <dl className="expense-preview">
                         <div><dt>Category</dt><dd>{selectedCategory.description} ({selectedCategory.nominalCode})</dd></div>
-                        <div><dt>Date</dt><dd>{formatReceiptDate(receipt.verifiedData.receiptDate)}</dd></div>
-                        <div><dt>Original payment</dt><dd>−{formatMoney(receipt.verifiedData.grossTotal, receipt.verifiedData.currency)}</dd></div>
-                        {receipt.verifiedData.currency !== "GBP" && <div><dt>Final GBP amount</dt><dd>−{formatMoney(receipt.verifiedData.gbpAmountCharged ?? "", "GBP")}</dd></div>}
-                        <div><dt>Description</dt><dd>{receipt.verifiedData.purchaseDescription}</dd></div>
-                        <div><dt>VAT treatment</dt><dd>{receipt.verifiedData.currency !== "GBP" ? "No UK VAT" : receipt.verifiedData.vatTotal ? "Confirm in Stage 8" : "No VAT printed"}</dd></div>
+                        <div><dt>Date</dt><dd>{formatReceiptDate(displayValues.receiptDate ?? "")}</dd></div>
+                        <div><dt>Original payment</dt><dd>−{formatMoney(displayValues.grossTotal ?? "", displayValues.currency ?? "GBP")}</dd></div>
+                        {displayValues.currency !== "GBP" && <div><dt>Final GBP amount</dt><dd>−{formatMoney(displayValues.gbpAmountCharged ?? "", "GBP")}</dd></div>}
+                        <div><dt>Description</dt><dd>{displayValues.purchaseDescription}</dd></div>
+                        <div><dt>VAT treatment</dt><dd>{displayValues.currency !== "GBP" ? "No UK VAT" : displayValues.vatTotal ? "Confirm when creating the expense" : "No VAT printed"}</dd></div>
                         <div><dt>Attachment</dt><dd>{receipt.processedContentType === "application/pdf" ? "Complete receipt PDF" : "Processed receipt JPEG"}</dd></div>
                       </dl>
                     )}
@@ -433,32 +465,28 @@ export function ReceiptMatching({
               </>
             ) : null}
             {error && <p className="message error" role="alert">{error}</p>}
-          </section>
+          </fieldset>
         </div>
 
         <footer className="matching-actions">
           <p>{attachmentSent
             ? <><strong>Attached.</strong> The existing explanation and category were left unchanged.</>
-            : <><strong>Separate confirmation.</strong> Saving a proposal does not change FreeAgent.</>}</p>
-          <button className="secondary-button" type="button" onClick={onClose} disabled={saving}>Later</button>
-          {!attachmentSent && <button className="primary-button" type="button" onClick={() => void saveProposal()} disabled={!options || saving || (mode === "transaction" && !selectedTransactionId) || (mode === "out_of_pocket" && !selectedCategoryUrl)}>
-              {saving ? "Saving…" : mode === "transaction" ? "Save match proposal" : mode === "out_of_pocket" ? "Save expense proposal" : "Keep unmatched"}
-            </button>}
+            : mode === "transaction" ? <>Confirm the details and selected transaction to attach this receipt.</> : <>Save for later. No expense will be sent to FreeAgent.</>}</p>
+          <button className="secondary-button" type="button" onClick={onClose} disabled={saving || sendingAttachment}>Later</button>
+          {!attachmentSent && (mode === "transaction" ? <button className="primary-button" type="button" onClick={() => void confirmAttachment()} disabled={!optionsCurrent || !previewCurrent || attachmentPreview?.state !== "ready" || sendingAttachment || saving}>
+            {sendingAttachment ? "Sending…" : "Confirm & send"}
+          </button> : <button className="primary-button" type="button" onClick={() => void saveProposal()} disabled={!optionsCurrent || saving || sendingAttachment || (mode === "out_of_pocket" && !selectedCategoryUrl)}>
+            {saving ? "Saving…" : mode === "out_of_pocket" ? "Save expense proposal" : "Keep unmatched"}
+          </button>)}
+          {attachmentError && <button className="text-button" type="button" onClick={() => setPreviewRefresh((current) => current + 1)} disabled={sendingAttachment}>Retry FreeAgent check</button>}
+
         </footer>
       </div>
     </div>
   );
 }
 
-function AttachmentPanel({
-  preview,
-  sending,
-  onConfirm,
-}: {
-  preview: AttachmentPreviewResponse;
-  sending: boolean;
-  onConfirm(): void;
-}) {
+function AttachmentPanel({ preview }: { preview: AttachmentPreviewResponse }) {
   if (preview.state === "sent") {
     return (
       <section className="attachment-panel sent" aria-label="FreeAgent delivery complete">
@@ -484,7 +512,7 @@ function AttachmentPanel({
       <div className="attachment-panel-heading">
         <div>
           <p className="eyebrow">Live FreeAgent check</p>
-          <h3>{preview.state === "ready" ? "Ready for your confirmation." : "Attachment blocked safely."}</h3>
+          <h3>{preview.state === "ready" ? "FreeAgent transaction ready." : "Needs attention in FreeAgent."}</h3>
         </div>
         <span>{preview.state === "ready" ? "Attachment only" : "No write"}</span>
       </div>
@@ -503,11 +531,7 @@ function AttachmentPanel({
         </ul>
       )}
       <p className="attachment-assurance"><strong>Only the receipt attachment will be sent.</strong> The existing category, date, description, amount and VAT treatment stay exactly as they are in FreeAgent.</p>
-      {preview.state === "ready" && (
-        <button className="attachment-confirm-button" type="button" onClick={onConfirm} disabled={sending || !preview.confirmationToken}>
-          {sending ? "Attaching receipt…" : preview.reconcileExisting ? "Confirm existing attachment" : "Attach receipt to FreeAgent"}
-        </button>
-      )}
+
     </section>
   );
 }

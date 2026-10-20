@@ -83,8 +83,9 @@ service cloud.firestore {
     }
 
     function hasValidProcessedImage(receiptId) {
-      return request.resource.data.processedStoragePath ==
-          'receipts/' + request.auth.uid + '/' + receiptId + '/processed-v1.jpg'
+      return request.resource.data.processedStoragePath.matches(
+          'receipts/' + request.auth.uid + '/' + receiptId + '/processed-v1(-[a-f0-9-]{36})?\\.jpg'
+        )
         && request.resource.data.processedContentType == 'image/jpeg'
         && request.resource.data.processedSize is int
         && request.resource.data.processedSize > 0
@@ -140,6 +141,20 @@ service cloud.firestore {
           'processedStoragePath', 'processedContentType', 'processedSize',
           'processing', 'reviewedAt'
         ]);
+    }
+
+    function isImageAdjustment(receiptId) {
+      return resource.data.status in ['ready_for_extraction', 'verified']
+        && !resource.data.keys().hasAny(['delivery'])
+        && request.resource.data.status == 'ready_for_extraction'
+        && request.resource.data.processedStoragePath != resource.data.processedStoragePath
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'processedStoragePath', 'processedContentType', 'processedSize',
+          'processing', 'reviewedAt', 'extraction', 'verifiedData', 'verifiedAt', 'matching'
+        ])
+        && !request.resource.data.keys().hasAny(['extraction', 'verifiedData', 'verifiedAt', 'matching'])
+        && hasValidProcessedImage(receiptId)
+        && request.resource.data.reviewedAt == request.time;
     }
 
     function isValidMoney(value) {
@@ -202,7 +217,7 @@ service cloud.firestore {
           && resource.data.delivery.state == 'sent');
       allow update: if isOwner()
         && resource.data.ownerUid == request.auth.uid
-        && (isEmailReviewUpdate(receiptId) || isVerificationUpdate());
+        && (isEmailReviewUpdate(receiptId) || isVerificationUpdate() || isImageAdjustment(receiptId));
     }
 
     match /{document=**} {

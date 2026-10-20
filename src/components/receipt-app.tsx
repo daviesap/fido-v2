@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   collection,
   deleteDoc,
+  deleteField,
   doc,
   onSnapshot,
   orderBy,
@@ -24,8 +25,7 @@ import {
 import { useAuth } from "@/components/auth-provider";
 import { DocumentReview } from "@/components/document-review";
 import { ReceiptReview } from "@/components/receipt-review";
-import { ReceiptVerification } from "@/components/receipt-verification";
-import { ReceiptMatching } from "@/components/receipt-matching";
+import { ReceiptMatching, type ReviewReceipt } from "@/components/receipt-matching";
 import { FreeAgentConnectionCard } from "@/components/freeagent-connection";
 import { db, functions, storage } from "@/lib/firebase";
 import { PROCESSING_VERSION, type ProcessedReceiptImage } from "@/lib/image-processing";
@@ -43,29 +43,26 @@ import {
   type ReadyForVerificationExtraction,
   type Receipt,
   type ReceiptQueue,
-  type VerifiedReceiptValues,
 } from "@/lib/receipt";
 
 type AppMessage = { text: string; error?: boolean };
 type EmailReviewReceipt = Extract<Receipt, { status: "needs_review" }>;
-type ReviewTarget = { file: File; receipt?: EmailReviewReceipt };
+type ReviewTarget = { file: File; receipt?: EmailReviewReceipt | ReviewReceipt; adjust?: boolean };
 type ReadyToVerifyReceipt = Extract<Receipt, { status: "ready_for_extraction" }> & {
   extraction: ReadyForVerificationExtraction;
 };
-type VerifiedReceipt = Extract<Receipt, { status: "verified" }>;
-type ReceiptFilter = "to_do" | "all" | ReceiptQueue;
+type ReceiptFilter = "to_do" | "all" | "ready" | ReceiptQueue;
 
 const RECEIPT_FILTERS: { value: ReceiptFilter; label: string }[] = [
   { value: "to_do", label: "To do" },
   { value: "needs_review", label: "Needs review" },
-  { value: "ready_to_verify", label: "Ready to verify" },
-  { value: "ready_to_match", label: "Ready to match" },
-  { value: "proposed", label: "Proposals" },
+  { value: "ready", label: "Ready to review" },
   { value: "problems", label: "Problems" },
   { value: "extracting", label: "Extracting" },
   { value: "sent", label: "Sent" },
 ];
 
+const REVIEW_QUEUES = new Set<ReceiptQueue>(["ready_to_verify", "ready_to_match", "proposed"]);
 const TO_DO_QUEUES = new Set<ReceiptQueue>(["needs_review", "ready_to_verify", "ready_to_match", "proposed", "problems"]);
 
 export function ReceiptApp() {
@@ -78,8 +75,7 @@ export function ReceiptApp() {
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState<AppMessage | null>(null);
   const [selected, setSelected] = useState<Receipt | null>(null);
-  const [verificationTarget, setVerificationTarget] = useState<ReadyToVerifyReceipt | null>(null);
-  const [matchingTarget, setMatchingTarget] = useState<VerifiedReceipt | null>(null);
+  const [matchingTarget, setMatchingTarget] = useState<ReviewReceipt | null>(null);
   const [reviewTarget, setReviewTarget] = useState<ReviewTarget | null>(null);
   const [openingReviewId, setOpeningReviewId] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
@@ -91,7 +87,9 @@ export function ReceiptApp() {
     ? receipts
     : filter === "to_do"
       ? receipts.filter((receipt) => TO_DO_QUEUES.has(receiptQueue(receipt)))
-      : receipts.filter((receipt) => receiptQueue(receipt) === filter);
+      : filter === "ready"
+        ? receipts.filter((receipt) => REVIEW_QUEUES.has(receiptQueue(receipt)))
+        : receipts.filter((receipt) => receiptQueue(receipt) === filter);
 
   useEffect(() => {
     if (!user) return;
@@ -132,7 +130,7 @@ export function ReceiptApp() {
 
     const receiptId = target.receipt?.id ?? crypto.randomUUID();
     const originalPath = target.receipt?.storagePath ?? `receipts/${user.uid}/${receiptId}/original-${safeFileName(file.name)}`;
-    const processedPath = `receipts/${user.uid}/${receiptId}/processed-v${PROCESSING_VERSION}.jpg`;
+    const processedPath = `receipts/${user.uid}/${receiptId}/processed-v${PROCESSING_VERSION}${target.receipt && target.receipt.status !== "needs_review" ? `-${crypto.randomUUID()}` : ""}.jpg`;
     const originalRef = ref(storage, originalPath);
     const processedRef = ref(storage, processedPath);
     const uploadedObjects: StorageReference[] = [];
@@ -183,6 +181,7 @@ export function ReceiptApp() {
       if (target.receipt) {
         await updateDoc(doc(db, "receipts", receiptId), {
           ...reviewedFields,
+          ...(target.receipt.status !== "needs_review" ? { extraction: deleteField(), verifiedData: deleteField(), verifiedAt: deleteField(), matching: deleteField() } : {}),
           reviewedAt: serverTimestamp(),
         });
       } else {
@@ -196,9 +195,12 @@ export function ReceiptApp() {
         createdAt: serverTimestamp(),
       });
       }
+      if (target.receipt && hasProcessedAsset(target.receipt) && hasSeparateProcessedAsset(target.receipt) && target.receipt.processedStoragePath !== processedPath) {
+        await deleteObject(ref(storage, target.receipt.processedStoragePath)).catch(() => undefined);
+      }
       setProgress(100);
       setMessage({ text: target.receipt
-        ? "Emailed receipt reviewed. Extraction is queued in the background."
+        ? "Receipt image saved. Extraction is queued in the background."
         : processed.qualityWarnings.length ? "Receipt stored with its quality notes and queued for extraction." : "Receipt stored and queued for extraction." });
     } catch (error) {
       await Promise.all(uploadedObjects.map((objectRef) => deleteObject(objectRef).catch(() => undefined)));
@@ -301,7 +303,6 @@ export function ReceiptApp() {
       })));
       await deleteDoc(doc(db, "receipts", receipt.id));
       if (selected?.id === receipt.id) setSelected(null);
-      if (verificationTarget?.id === receipt.id) setVerificationTarget(null);
       if (matchingTarget?.id === receipt.id) setMatchingTarget(null);
       setMessage({ text: "Receipt deleted." });
     } catch (error) {
@@ -309,15 +310,20 @@ export function ReceiptApp() {
     }
   }
 
-  async function verifyReceipt(receipt: ReadyToVerifyReceipt, values: VerifiedReceiptValues) {
-    const next = receipts.find((candidate): candidate is ReadyToVerifyReceipt => candidate.id !== receipt.id && isReadyToVerify(candidate));
-    await updateDoc(doc(db, "receipts", receipt.id), {
-      status: "verified",
-      verifiedData: values,
-      verifiedAt: serverTimestamp(),
-    });
-    setVerificationTarget(next ?? null);
-    setMessage({ text: next ? "Receipt verified. Here’s the next one." : "Receipt verified and ready for matching." });
+  async function adjustReceiptImage(receipt: ReviewReceipt) {
+    setMessage(null);
+    try {
+      const blob = await getBlob(ref(storage, receipt.storagePath));
+      setMatchingTarget(null);
+      setReviewTarget({ file: new File([blob], receipt.originalFileName, { type: receipt.contentType }), receipt, adjust: true });
+    } catch (cause) {
+      setMessage({ text: cause instanceof Error ? cause.message : "The original image could not be opened.", error: true });
+    }
+  }
+
+  function reviewNextReceipt() {
+    setMatchingTarget(receipts.find((candidate): candidate is ReviewReceipt => candidate.id !== matchingTarget?.id
+      && (isReadyToVerify(candidate) || (candidate.status === "verified" && !candidate.delivery))) ?? null);
   }
 
   async function retryExtraction(receipt: Extract<Receipt, { status: "ready_for_extraction" }>) {
@@ -337,8 +343,8 @@ export function ReceiptApp() {
   function openReceipt(receipt: Receipt) {
     if (receipt.status === "needs_review") {
       void reviewEmailedReceipt(receipt);
-    } else if (isReadyToVerify(receipt)) {
-      setVerificationTarget(receipt);
+    } else if (isReadyToVerify(receipt) || receipt.status === "verified") {
+      setMatchingTarget(receipt);
     } else {
       setSelected(receipt);
     }
@@ -398,7 +404,9 @@ export function ReceiptApp() {
             {RECEIPT_FILTERS.map((item) => {
               const count = item.value === "to_do"
                 ? receipts.filter((receipt) => TO_DO_QUEUES.has(receiptQueue(receipt))).length
-                : receipts.filter((receipt) => receiptQueue(receipt) === item.value).length;
+                : item.value === "ready"
+                  ? receipts.filter((receipt) => REVIEW_QUEUES.has(receiptQueue(receipt))).length
+                  : receipts.filter((receipt) => receiptQueue(receipt) === item.value).length;
               if (count === 0 && filter !== item.value && item.value !== "to_do") return null;
               return (
                 <button
@@ -418,7 +426,7 @@ export function ReceiptApp() {
             >All receipts <span>{receipts.length}</span></button>
           </div>
           {loading ? <div className="loading"><div className="spinner" /></div> : receipts.length === 0 ? (
-            <div className="empty"><span>02</span><h3>No receipts yet</h3><p>Your first reviewed upload will appear here.</p></div>
+            <div className="empty"><span>02</span><h3>No receipts yet</h3><p>Upload or email a receipt to get started.</p></div>
           ) : filteredReceipts.length === 0 ? (
             <div className="empty"><span>—</span><h3>Nothing in this queue</h3><p>Choose another filter to see your receipts.</p></div>
           ) : (
@@ -431,7 +439,7 @@ export function ReceiptApp() {
                   retrying={retryingId === receipt.id}
                   onOpen={() => openReceipt(receipt)}
                   onReview={() => receipt.status === "needs_review" ? void reviewEmailedReceipt(receipt) : undefined}
-                  onVerify={() => isReadyToVerify(receipt) ? setVerificationTarget(receipt) : undefined}
+                  onVerify={() => isReadyToVerify(receipt) ? setMatchingTarget(receipt) : undefined}
                   onRetry={() => receipt.status === "ready_for_extraction" ? void retryExtraction(receipt) : undefined}
                   onMatch={() => receipt.status === "verified" ? setMatchingTarget(receipt) : undefined}
                   onDelete={() => void remove(receipt)}
@@ -460,22 +468,16 @@ export function ReceiptApp() {
       {reviewTarget && receiptContentType(reviewTarget.file) === "application/pdf" ? (
         <DocumentReview file={reviewTarget.file} onCancel={() => setReviewTarget(null)} onApprove={approveCompletePdf} />
       ) : reviewTarget ? (
-        <ReceiptReview file={reviewTarget.file} onCancel={() => setReviewTarget(null)} onApprove={(result) => void uploadReviewedReceipt(result)} />
+        <ReceiptReview file={reviewTarget.file} onCancel={() => setReviewTarget(null)} autoProcess={!reviewTarget.adjust} onApprove={(result) => void uploadReviewedReceipt(result)} />
       ) : null}
-      {verificationTarget && (
-        <ReceiptVerification
-          key={verificationTarget.id}
-          receipt={verificationTarget}
-          onCancel={() => setVerificationTarget(null)}
-          onVerify={(values) => verifyReceipt(verificationTarget, values)}
-        />
-      )}
       {matchingTarget && (
         <ReceiptMatching
           key={matchingTarget.id}
           receipt={matchingTarget}
           onClose={() => setMatchingTarget(null)}
           onSaved={(text) => setMessage({ text })}
+          onComplete={reviewNextReceipt}
+          onAdjustImage={() => void adjustReceiptImage(matchingTarget)}
         />
       )}
       {selected && <ReceiptViewer receipt={selected} onClose={() => setSelected(null)} onDelete={() => void remove(selected)} />}
@@ -623,8 +625,8 @@ function ReceiptCard({
       </div>
       <div className="receipt-card-actions">
         {needsReview && <button className="review-button" onClick={onReview} disabled={opening}>{opening ? "Opening…" : "Review receipt"}</button>}
-        {queue === "ready_to_verify" && <button className="review-button" onClick={onVerify}>Verify values</button>}
-        {(queue === "ready_to_match" || queue === "proposed") && <button className="review-button" onClick={onMatch}>{queue === "proposed" ? "Review proposal" : "Match receipt"}</button>}
+        {queue === "ready_to_verify" && <button className="review-button" onClick={onVerify}>Review & send</button>}
+        {(queue === "ready_to_match" || queue === "proposed") && <button className="review-button" onClick={onMatch}>Review & send</button>}
         {queue === "sent" && <button className="review-button" onClick={onMatch}>View FreeAgent receipt</button>}
         {queue === "problems" && <button className="review-button" onClick={onRetry} disabled={retrying}>{retrying ? "Queuing…" : "Try again"}</button>}
         {queue === "extracting" && receipt.status === "ready_for_extraction" && !receipt.extraction

@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { httpsCallable } from "firebase/functions";
-import { getBlob, ref } from "firebase/storage";
-import { functions, storage } from "@/lib/firebase";
+import { functions } from "@/lib/firebase";
 import {
   VerifiedReceiptValuesSchema,
   type ReadyForVerificationExtraction,
@@ -11,9 +10,7 @@ import {
   type VerifiedReceiptValues,
 } from "@/lib/receipt";
 
-type ReadyReceipt = Extract<Receipt, { status: "ready_for_extraction" }> & {
-  extraction: ReadyForVerificationExtraction;
-};
+type ReadyReceipt = (Extract<Receipt, { status: "ready_for_extraction" }> & { extraction: ReadyForVerificationExtraction }) | Extract<Receipt, { status: "verified" }>;
 
 type FormValues = Record<keyof VerifiedReceiptValues, string>;
 
@@ -37,55 +34,37 @@ type ForeignSuggestionResponse = {
 
 export function ReceiptVerification({
   receipt,
-  onCancel,
-  onVerify,
+  onDraftChange,
+  disabled = false,
 }: {
   receipt: ReadyReceipt;
-  onCancel(): void;
-  onVerify(values: VerifiedReceiptValues): Promise<void>;
+  onDraftChange(values: VerifiedReceiptValues | null): void;
+  disabled?: boolean;
 }) {
+  const foreignRequestVersion = useRef(0);
   const result = receipt.extraction.result;
+  const initial = receipt.status === "verified" ? receipt.verifiedData : result;
   const [values, setValues] = useState<FormValues>({
-    merchantName: result.merchantName ?? "",
-    purchaseDescription: result.purchaseDescription ?? "",
-    receiptDate: result.receiptDate ?? "",
-    currency: result.currency ?? "",
-    grossTotal: result.grossTotal ?? "",
-    netTotal: result.netTotal ?? "",
-    vatTotal: result.vatTotal ?? "",
-    gbpAmountCharged: "",
+    merchantName: initial.merchantName ?? "",
+    purchaseDescription: initial.purchaseDescription ?? "",
+    receiptDate: initial.receiptDate ?? "",
+    currency: initial.currency ?? "",
+    grossTotal: initial.grossTotal ?? "",
+    netTotal: initial.netTotal ?? "",
+    vatTotal: initial.vatTotal ?? "",
+    gbpAmountCharged: receipt.status === "verified" ? receipt.verifiedData.gbpAmountCharged ?? "" : "",
   });
-  const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const [imageFailed, setImageFailed] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+  const saving = disabled;
   const [foreignSuggestions, setForeignSuggestions] = useState<ForeignSuggestionResponse | null>(null);
   const [foreignSuggestionError, setForeignSuggestionError] = useState<string | null>(null);
   const [findingForeignTransaction, setFindingForeignTransaction] = useState(false);
   const [selectedForeignTransactionId, setSelectedForeignTransactionId] = useState("");
 
-  useEffect(() => {
-    let active = true;
-    let objectUrl: string | null = null;
-    void getBlob(ref(storage, receipt.processedStoragePath))
-      .then((blob) => {
-        if (!active) return;
-        objectUrl = URL.createObjectURL(blob);
-        setImageUrl(objectUrl);
-      })
-      .catch(() => {
-        if (active) setImageFailed(true);
-      });
-    return () => {
-      active = false;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [receipt.processedStoragePath]);
-
   function update(field: keyof FormValues, value: string) {
     const invalidatesSuggestion = ["merchantName", "receiptDate", "currency", "grossTotal"].includes(field);
     const clearsSuggestedGbp = invalidatesSuggestion && selectedForeignTransactionId !== "";
     if (invalidatesSuggestion) {
+      foreignRequestVersion.current += 1;
       setForeignSuggestions(null);
       setForeignSuggestionError(null);
       setSelectedForeignTransactionId("");
@@ -115,6 +94,7 @@ export function ReceiptVerification({
       setForeignSuggestionError("Complete the merchant, date, currency and gross total first.");
       return;
     }
+    const requestVersion = ++foreignRequestVersion.current;
     setFindingForeignTransaction(true);
     try {
       const find = httpsCallable<{
@@ -131,9 +111,9 @@ export function ReceiptVerification({
         currency: values.currency,
         grossTotal: values.grossTotal,
       });
-      setForeignSuggestions(response.data);
+      if (requestVersion === foreignRequestVersion.current) setForeignSuggestions(response.data);
     } catch (cause) {
-      setForeignSuggestionError(callableMessage(cause, "Recent transactions could not be checked."));
+      if (requestVersion === foreignRequestVersion.current) setForeignSuggestionError(callableMessage(cause, "Recent transactions could not be checked."));
     } finally {
       setFindingForeignTransaction(false);
     }
@@ -147,63 +127,18 @@ export function ReceiptVerification({
     setForeignSuggestionError(null);
   }
 
-  async function submit() {
-    setError(null);
+  useEffect(() => {
     const parsed = VerifiedReceiptValuesSchema.safeParse({
-      merchantName: values.merchantName,
-      purchaseDescription: values.purchaseDescription,
-      receiptDate: values.receiptDate,
-      currency: values.currency,
-      grossTotal: values.grossTotal,
+      ...values,
       netTotal: values.currency === "GBP" ? values.netTotal || null : null,
       vatTotal: values.currency === "GBP" ? values.vatTotal || null : null,
       gbpAmountCharged: values.currency !== "GBP" ? values.gbpAmountCharged || null : null,
     });
-    if (!parsed.success) {
-      setError(parsed.error.issues[0]?.message ?? "Check the receipt values.");
-      return;
-    }
-    if (totalsConflict(parsed.data)) {
-      setError("Net plus VAT must match the gross total to within one penny. Correct the values or leave net and VAT blank.");
-      return;
-    }
-    setSaving(true);
-    try {
-      await onVerify(parsed.data);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "The verified values could not be saved.");
-      setSaving(false);
-    }
-  }
+    onDraftChange(parsed.success && !totalsConflict(parsed.data) ? parsed.data : null);
+  }, [values, onDraftChange]);
 
   return (
-    <div className="verification-backdrop" role="dialog" aria-modal="true" aria-label={`Verify ${receipt.originalFileName}`}>
-      <div className="verification-dialog">
-        <header className="review-header">
-          <div>
-            <p className="eyebrow">Ready to verify</p>
-            <h2>Check the values, not every word.</h2>
-            <p>{receipt.originalFileName}</p>
-          </div>
-          <button className="text-button" type="button" onClick={onCancel} disabled={saving}>Close</button>
-        </header>
-
-        <div className="verification-workspace">
-          <div className="verification-image">
-            {imageUrl ? (
-              receipt.processedContentType === "application/pdf" ? (
-                <object className="viewer-pdf" data={imageUrl} type="application/pdf" aria-label={`Complete ${receipt.originalFileName}`}>
-                  <a href={imageUrl} download={receipt.originalFileName}>Open the complete PDF</a>
-                </object>
-              ) : (
-                // The private image is loaded through the authenticated Firebase SDK.
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={imageUrl} alt={`Processed ${receipt.originalFileName}`} />
-              )
-            ) : <span>{imageFailed ? "Preview unavailable" : "Loading receipt…"}</span>}
-          </div>
-
-          <form className="verification-form" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+    <fieldset className="verification-form receipt-fields" disabled={disabled}>
             <p className="eyebrow">Receipt totals</p>
             <VerificationField
               label="Merchant"
@@ -293,7 +228,7 @@ export function ReceiptVerification({
                         ))}
                       </div>
                     ) : <p>No recent debit has a strong enough merchant, date and amount combination. Synchronise FreeAgent or enter the bank amount manually.</p>}
-                    {selectedForeignTransactionId && <p className="foreign-selection-confirmed">The exact bank debit has been copied into GBP amount charged. Verify the receipt to continue.</p>}
+                    {selectedForeignTransactionId && <p className="foreign-selection-confirmed">The exact bank debit has been copied into GBP amount charged.</p>}
                   </div>
                 )}
                 {foreignSuggestionError && <p className="message error" role="alert">{foreignSuggestionError}</p>}
@@ -326,16 +261,8 @@ export function ReceiptVerification({
                 <ul>{result.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
               </div>
             )}
-            {error && <p className="message error" role="alert">{error}</p>}
-            <p className="extraction-meta">Extracted with {receipt.extraction.model}. No line-item data is retained.</p>
-            <div className="verification-actions">
-              <button type="button" className="secondary-button" onClick={onCancel} disabled={saving}>Later</button>
-              <button type="submit" className="primary-button" disabled={saving}>{saving ? "Saving…" : "Verify & next"}</button>
-            </div>
-          </form>
-        </div>
-      </div>
-    </div>
+            <p className="extraction-meta">Check the receipt details before sending.</p>
+    </fieldset>
   );
 }
 

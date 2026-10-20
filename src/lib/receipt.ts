@@ -278,8 +278,8 @@ export function receiptStatusLabel(receipt: Receipt): string {
   return {
     needs_review: "Needs image review",
     extracting: "Extracting",
-    ready_to_verify: "Ready to verify",
-    ready_to_match: "Ready to match",
+    ready_to_verify: "Ready to review",
+    ready_to_match: "Ready to review",
     proposed: "Proposal ready",
     sent: "Sent to FreeAgent",
     problems: "Problem",

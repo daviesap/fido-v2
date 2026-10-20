@@ -250,7 +250,7 @@ describe("receipt display helpers", () => {
       verifiedAt: null,
     });
     expect(receiptQueue({ id: "id", ...base })).toBe("ready_to_match");
-    expect(receiptStatusLabel({ id: "id", ...base })).toBe("Ready to match");
+    expect(receiptStatusLabel({ id: "id", ...base })).toBe("Ready to review");
     const proposed = ReceiptSchema.parse({
       ...base,
       matching: { state: "proposed", type: "transaction", label: "Coffee card payment", updatedAt: null },
