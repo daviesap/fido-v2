@@ -75,6 +75,7 @@ export function ReceiptApp() {
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState<AppMessage | null>(null);
   const [selected, setSelected] = useState<Receipt | null>(null);
+  const completedReceiptIds = useRef(new Set<string>());
   const [matchingTarget, setMatchingTarget] = useState<ReviewReceipt | null>(null);
   const [reviewTarget, setReviewTarget] = useState<ReviewTarget | null>(null);
   const [openingReviewId, setOpeningReviewId] = useState<string | null>(null);
@@ -322,7 +323,8 @@ export function ReceiptApp() {
   }
 
   function reviewNextReceipt() {
-    setMatchingTarget(receipts.find((candidate): candidate is ReviewReceipt => candidate.id !== matchingTarget?.id
+    if (matchingTarget) completedReceiptIds.current.add(matchingTarget.id);
+    setMatchingTarget(receipts.find((candidate): candidate is ReviewReceipt => !completedReceiptIds.current.has(candidate.id)
       && (isReadyToVerify(candidate) || (candidate.status === "verified" && !candidate.delivery))) ?? null);
   }
 

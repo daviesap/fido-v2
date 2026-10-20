@@ -65,6 +65,15 @@ describe("combined receipt review", () => {
     expect(api.call.mock.calls.some(([name]) => name === "confirmReceiptAttachment")).toBe(false);
     await waitFor(() => expect(api.call).toHaveBeenCalledWith("getReceiptAttachmentPreview", expect.objectContaining({ values: expect.objectContaining({ merchantName: "Different shop" }) })), { timeout: 2500 });
   });
+  it("keeps invalid amount edits disabled without interrupting review", async () => {
+    openReview();
+    const button = await readyButton();
+    fireEvent.change(screen.getByLabelText("Gross total"), { target: { value: "£12.00" } });
+    await waitFor(() => expect(button.disabled).toBe(true));
+    expect(screen.getByLabelText("Gross total")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Gross total"), { target: { value: "12.00" } });
+    await readyButton();
+  });
   it("invalidates the preview when a different transaction is selected", async () => {
     openReview();
     const button = await readyButton();

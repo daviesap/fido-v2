@@ -8,6 +8,7 @@ describe("receipt review boundary", () => {
     expect(ReviewValuesSchema.safeParse({ ...values, currency: "EUR", netTotal: null, vatTotal: null, gbpAmountCharged: "10.32" }).success).toBe(true);
   });
   it.each([
+    { grossTotal: "abc" }, { netTotal: "abc" }, { vatTotal: "-" }, { gbpAmountCharged: "£12" },
     { grossTotal: "0" }, { purchaseDescription: "" }, { receiptDate: "2026-02-30" },
     { netTotal: "9.50" }, { gbpAmountCharged: "12.00" },
     { currency: "EUR", netTotal: null, vatTotal: null },

@@ -85,10 +85,10 @@ const VerifiedReceiptValuesShape = {
   purchaseDescription: z.string().trim().min(1, "Enter a short purchase description.").max(80),
   receiptDate: DateSchema,
   currency: CurrencySchema,
-  grossTotal: MoneySchema.refine((value) => moneyToMinorUnits(value) > 0n, "Enter a total greater than zero."),
+  grossTotal: MoneySchema.pipe(z.string().refine((value) => moneyToMinorUnits(value) > 0n, "Enter a total greater than zero.")),
   netTotal: MoneySchema.nullable(),
   vatTotal: MoneySchema.nullable(),
-  gbpAmountCharged: MoneySchema.refine((value) => moneyToMinorUnits(value) > 0n, "Enter a GBP amount greater than zero.").nullable(),
+  gbpAmountCharged: MoneySchema.pipe(z.string().refine((value) => moneyToMinorUnits(value) > 0n, "Enter a GBP amount greater than zero.")).nullable(),
 };
 
 export const VerifiedReceiptValuesSchema = z.object(VerifiedReceiptValuesShape).superRefine((value, context) => {
