@@ -438,3 +438,9 @@ img { display: block; max-width: 100%; }
   .candidate-reasons { display: none; }
   .expense-preview div { grid-template-columns: 1fr; gap: 3px; }
 }
+
+/* The combined receipt review keeps fields and the FreeAgent preview in one scroll area. */
+.receipt-fields { margin: 0; min-width: 0; border: 0; }
+.matching-panel > .verification-form { padding: 0 0 24px; overflow: visible; border: 0; }
+.matching-receipt > .secondary-button { margin: 12px 18px; }
+.matching-actions button { white-space: nowrap; }

@@ -7,7 +7,7 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from "@firebase/rules-unit-testing";
-import { deleteDoc, doc, getDoc, serverTimestamp, setDoc, updateDoc } from "firebase/firestore";
+import { deleteDoc, deleteField, doc, getDoc, serverTimestamp, setDoc, updateDoc } from "firebase/firestore";
 import { afterAll, afterEach, beforeAll, describe, it } from "vitest";
 
 let testEnv: RulesTestEnvironment;
@@ -144,6 +144,28 @@ describe("Firestore receipt rules", () => {
 
   afterAll(async () => {
     await testEnv.cleanup();
+  });
+
+  it("allows an image revision only when extraction and prior approvals are cleared", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "receipts/receipt-1"), { ...reviewedReceipt, status: "verified", extraction: readyExtraction, verifiedData, verifiedAt: serverTimestamp(), matching: { state: "proposed" } });
+    });
+    const reference = doc(testEnv.authenticatedContext(ownerUid, { fidoOwner: true }).firestore(), "receipts/receipt-1");
+    const revision = {
+      status: "ready_for_extraction", processedStoragePath: `receipts/${ownerUid}/receipt-1/processed-v1-12345678-1234-1234-1234-123456789abc.jpg`,
+      processing: reviewedReceipt.processing, reviewedAt: serverTimestamp(),
+    };
+    await assertFails(updateDoc(reference, revision));
+    await assertFails(updateDoc(reference, { ...revision, storagePath: "another-original.jpg", extraction: deleteField(), verifiedData: deleteField(), verifiedAt: deleteField(), matching: deleteField() }));
+    await assertSucceeds(updateDoc(reference, { ...revision, extraction: deleteField(), verifiedData: deleteField(), verifiedAt: deleteField(), matching: deleteField() }));
+  });
+
+  it("prevents image changes after delivery", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "receipts/receipt-1"), { ...reviewedReceipt, status: "verified", extraction: readyExtraction, verifiedData, delivery: { state: "sent" } });
+    });
+    const reference = doc(testEnv.authenticatedContext(ownerUid, { fidoOwner: true }).firestore(), "receipts/receipt-1");
+    await assertFails(updateDoc(reference, { status: "ready_for_extraction", processedStoragePath: `receipts/${ownerUid}/receipt-1/processed-v1-12345678-1234-1234-1234-123456789abc.jpg`, processing: reviewedReceipt.processing, reviewedAt: serverTimestamp(), extraction: deleteField(), verifiedData: deleteField() }));
   });
 
   it("lets the configured owner create, read, and delete their receipt", async () => {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ReactCrop, { type PercentCrop } from "react-image-crop";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import {
@@ -20,11 +20,15 @@ export function ReceiptReview({
   file,
   onApprove,
   onCancel,
+  autoProcess = true,
 }: {
   file: File;
+  autoProcess?: boolean;
   onApprove(result: ProcessedReceiptImage): void;
   onCancel(): void;
 }) {
+  const approveRef = useRef(onApprove);
+  useEffect(() => { approveRef.current = onApprove; }, [onApprove]);
   const [normalisedSource, setNormalisedSource] = useState<Blob | null>(null);
   const [rotatedSource, setRotatedSource] = useState<Blob | null>(null);
   const [crop, setCrop] = useState<PercentCrop>(DEFAULT_CROP);
@@ -63,6 +67,12 @@ export function ReceiptReview({
       }
       const blob = await normaliseReceiptForEditing(file);
       const suggestedCrop = await suggestReceiptCrop(blob);
+      if (autoProcess) {
+        const result = await processReceiptImage(blob, { unit: "%", x: 0, y: 0, width: 100, height: 100 }, 0, null);
+        if (!active) return;
+        if (!result.qualityWarnings.length) { approveRef.current(result); return; }
+        setProcessed(result);
+      }
       if (active) {
         setNormalisedSource(blob);
         setRotatedSource(blob);
@@ -79,7 +89,7 @@ export function ReceiptReview({
       active = false;
       if (openedPdf) void openedPdf.destroy();
     };
-  }, [file]);
+  }, [file, autoProcess]);
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {

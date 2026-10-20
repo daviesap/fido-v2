@@ -9,6 +9,7 @@ import { HttpsError, onCall, onRequest } from "firebase-functions/v2/https";
 import { onTaskDispatched } from "firebase-functions/v2/tasks";
 import { logger } from "firebase-functions";
 import OpenAI from "openai";
+import { prepareEmailReceipt } from "./email-preparation.js";
 import { z } from "zod";
 import {
   DEFAULT_RECEIPT_MODEL,
@@ -63,6 +64,8 @@ import {
   evaluateAttachmentEligibility,
 } from "./delivery.js";
 
+import { ReviewValuesSchema, validProcessedImagePath, type ReviewValues } from "./review.js";
+
 initializeApp();
 
 const ingestSharedSecret = defineSecret("FIDO_INGEST_SHARED_SECRET");
@@ -92,6 +95,9 @@ const ConfirmReceiptAttachmentSchema = ReceiptMatchRequestSchema.extend({
   confirmationToken: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
 });
 
+const ReviewRequestSchema = ReceiptMatchRequestSchema.extend({ values: ReviewValuesSchema.optional() });
+const ReviewPreviewRequestSchema = ReviewRequestSchema.extend({ transactionId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).optional() });
+
 const ForeignReceiptSuggestionRequestSchema = ReceiptMatchRequestSchema.extend({
   merchantName: z.string().trim().min(1).max(160),
   receiptDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -105,15 +111,15 @@ const FreeAgentCategoryUrlSchema = z.string().url().refine((value) => {
 });
 
 const SaveReceiptMatchProposalSchema = z.discriminatedUnion("type", [
-  ReceiptMatchRequestSchema.extend({
+  ReviewRequestSchema.extend({
     type: z.literal("transaction"),
     transactionId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
   }),
-  ReceiptMatchRequestSchema.extend({
+  ReviewRequestSchema.extend({
     type: z.literal("out_of_pocket"),
     categoryUrl: FreeAgentCategoryUrlSchema,
   }),
-  ReceiptMatchRequestSchema.extend({
+  ReviewRequestSchema.extend({
     type: z.literal("unmatched"),
   }),
 ]);
@@ -157,7 +163,13 @@ export const queueReceiptExtraction = onDocumentWritten({
   const receipt = snapshot.data();
   if (!receipt || receipt.status !== "ready_for_extraction" || receipt.extraction) return;
 
-  const payload: ExtractionTask = { receiptId: event.params.receiptId, generation: 1 };
+  if (event.data?.before.exists && event.data.before.get("processedStoragePath") !== snapshot.get("processedStoragePath")) {
+    await Promise.all([
+      freeAgentMatchProposalsRef(receipt.ownerUid).doc(event.params.receiptId).delete(),
+      freeAgentAttachmentPreviewsRef(receipt.ownerUid).doc(event.params.receiptId).delete(),
+    ]);
+  }
+  const payload: ExtractionTask = { receiptId: event.params.receiptId, generation: (event.data?.before.get("extraction.generation") as number | undefined ?? 0) + 1 };
   const queued = await getFirestore().runTransaction(async (transaction) => {
     const current = await transaction.get(snapshot.ref);
     if (!current.exists || current.get("status") !== "ready_for_extraction") return false;
@@ -243,8 +255,7 @@ export const extractReceipt = onTaskDispatched<ExtractionTask>({
   try {
     const processedStoragePath = receipt.processedStoragePath;
     const processedContentType = receipt.processedContentType;
-    const expectedImagePath = `receipts/${receipt.ownerUid}/${payload.receiptId}/processed-v1.jpg`;
-    const validImage = processedContentType === "image/jpeg" && processedStoragePath === expectedImagePath;
+    const validImage = processedContentType === "image/jpeg" && validProcessedImagePath(processedStoragePath, receipt.ownerUid, payload.receiptId);
     const validCompletePdf = processedContentType === "application/pdf"
       && receipt.contentType === "application/pdf"
       && processedStoragePath === receipt.storagePath;
@@ -570,9 +581,9 @@ export const getReceiptMatchOptions = onCall({
   timeoutSeconds: 30,
 }, async (request) => {
   const ownerUid = requireOwner(request.auth);
-  const parsed = ReceiptMatchRequestSchema.safeParse(request.data);
+  const parsed = ReviewRequestSchema.safeParse(request.data);
   if (!parsed.success) throw new HttpsError("invalid-argument", "A valid receipt is required.");
-  const receipt = await verifiedReceiptForMatching(ownerUid, parsed.data.receiptId);
+  const receipt = await verifiedReceiptForMatching(ownerUid, parsed.data.receiptId, parsed.data.values);
   const [transactionSnapshot, proposalSnapshot, syncSnapshot] = await Promise.all([
     freeAgentTransactionsRef(ownerUid).get(),
     freeAgentMatchProposalsRef(ownerUid).get(),
@@ -610,8 +621,8 @@ export const getForeignReceiptMatchOptions = onCall({
   if (!receiptSnapshot.exists || receiptSnapshot.get("ownerUid") !== ownerUid) {
     throw new HttpsError("not-found", "Receipt not found.");
   }
-  if (receiptSnapshot.get("status") !== "ready_for_extraction"
-    || receiptSnapshot.get("extraction.state") !== "ready_for_verification") {
+  if ((receiptSnapshot.get("status") !== "ready_for_extraction" && receiptSnapshot.get("status") !== "verified")
+    || receiptSnapshot.get("delivery.state") === "sent" || receiptSnapshot.get("extraction.state") !== "ready_for_verification") {
     throw new HttpsError("failed-precondition", "This receipt is not awaiting verification.");
   }
 
@@ -621,7 +632,7 @@ export const getForeignReceiptMatchOptions = onCall({
     freeAgentSyncRef(ownerUid).get(),
   ]);
   const reservedIds = new Set(proposalSnapshot.docs.flatMap((document) => {
-    if (document.get("type") !== "transaction") return [];
+    if (document.id === parsed.data.receiptId || document.get("type") !== "transaction") return [];
     const transactionId = document.get("transaction.id");
     return typeof transactionId === "string" ? [transactionId] : [];
   }));
@@ -660,7 +671,7 @@ export const saveReceiptMatchProposal = onCall({
   const parsed = SaveReceiptMatchProposalSchema.safeParse(request.data);
   if (!parsed.success) throw new HttpsError("invalid-argument", "Choose a valid matching option.");
   const selection = parsed.data;
-  const receipt = await verifiedReceiptForMatching(ownerUid, selection.receiptId);
+  const receipt = await verifiedReceiptForMatching(ownerUid, selection.receiptId, selection.values);
   const proposalRef = freeAgentMatchProposalsRef(ownerUid).doc(selection.receiptId);
   const existing = await proposalRef.get();
   const common = {
@@ -730,6 +741,7 @@ export const saveReceiptMatchProposal = onCall({
     proposal = { ...common, type: "unmatched" };
   }
 
+  if (selection.values) await persistReview(ownerUid, selection.receiptId, selection.values, String(receipt.data.processedStoragePath));
   await proposalRef.set(proposal);
   await getFirestore().collection("receipts").doc(selection.receiptId).set({
     matching: {
@@ -749,7 +761,7 @@ export const getReceiptAttachmentPreview = onCall({
   timeoutSeconds: 60,
 }, async (request) => {
   const ownerUid = requireOwner(request.auth);
-  const parsed = ReceiptMatchRequestSchema.safeParse(request.data);
+  const parsed = ReviewPreviewRequestSchema.safeParse(request.data);
   if (!parsed.success) throw new HttpsError("invalid-argument", "A valid receipt is required.");
   const receiptId = parsed.data.receiptId;
   const delivered = await freeAgentDeliveriesRef(ownerUid).doc(receiptId).get();
@@ -758,8 +770,11 @@ export const getReceiptAttachmentPreview = onCall({
   }
 
   try {
-    const context = await receiptAttachmentContext(ownerUid, receiptId);
+    const context = await receiptAttachmentContext(ownerUid, receiptId, parsed.data);
     const target = await liveAttachmentTarget(ownerUid, context.transactionUrl);
+    if (parsed.data.values && Math.abs(Number(target.transaction.amount)).toFixed(2) !== Number(parsed.data.values.currency === "GBP" ? parsed.data.values.grossTotal : parsed.data.values.gbpAmountCharged).toFixed(2)) {
+      throw new HttpsError("failed-precondition", "The selected bank debit does not match the receipt amount. Correct the amount or select another transaction.");
+    }
     const fileName = attachmentFileName(receiptId, context.attachmentContentType);
     const eligibility = evaluateAttachmentEligibility({
       transaction: target.transaction,
@@ -773,6 +788,8 @@ export const getReceiptAttachmentPreview = onCall({
       await freeAgentAttachmentPreviewsRef(ownerUid).doc(receiptId).set({
         ownerUid,
         receiptId,
+        ...(parsed.data.values ? { values: parsed.data.values } : {}),
+        ...(parsed.data.transactionId ? { transactionId: parsed.data.transactionId } : {}),
         tokenHash: hash(confirmationToken),
         fingerprint: attachmentTargetFingerprint(context, target),
         expiresAt: Timestamp.fromMillis(Date.now() + ATTACHMENT_PREVIEW_LIFETIME_MS),
@@ -814,7 +831,11 @@ export const confirmReceiptAttachment = onCall({
 
   let claimed = false;
   try {
-    const context = await receiptAttachmentContext(ownerUid, receiptId);
+    const draft = ReviewPreviewRequestSchema.parse({ receiptId,
+      ...(preview.get("values") ? { values: preview.get("values") } : {}),
+      ...(preview.get("transactionId") ? { transactionId: preview.get("transactionId") } : {}),
+    });
+    const context = await receiptAttachmentContext(ownerUid, receiptId, draft);
     const target = await liveAttachmentTarget(ownerUid, context.transactionUrl);
     const fileName = attachmentFileName(receiptId, context.attachmentContentType);
     const eligibility = evaluateAttachmentEligibility({
@@ -836,10 +857,19 @@ export const confirmReceiptAttachment = onCall({
       return { delivery: publicAttachmentDelivery(saved.data()!), writeEnabled: true as const };
     }
     claimed = true;
+    if (draft.values) await persistReview(ownerUid, receiptId, draft.values, context.processedStoragePath);
+    if (draft.transactionId) {
+      await freeAgentMatchProposalsRef(ownerUid).doc(receiptId).set({
+        ownerUid, receiptId, state: "proposed", type: "transaction", stage: 7,
+        receipt: { ...(context.values as Record<string, unknown>), processedStoragePath: context.processedStoragePath, processedSize: context.processedSize },
+        transaction: context.proposalTransaction,
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
 
-    const expectedImagePath = `receipts/${ownerUid}/${receiptId}/processed-v1.jpg`;
     const validAssetPath = context.attachmentContentType === "image/jpeg"
-      ? context.processedStoragePath === expectedImagePath
+      ? validProcessedImagePath(context.processedStoragePath, ownerUid, receiptId)
       : context.processedStoragePath === context.originalStoragePath;
     if (!validAssetPath) throw new HttpsError("failed-precondition", "The receipt attachment path is invalid.");
     const [asset] = await getStorage().bucket().file(context.processedStoragePath).download();
@@ -978,6 +1008,8 @@ function freeAgentDeliveriesRef(ownerUid: string) {
 type ReceiptAttachmentContext = {
   receiptId: string;
   merchantName: string;
+  values: unknown;
+  proposalTransaction: Record<string, unknown>;
   processedStoragePath: string;
   processedSize: number;
   originalStoragePath: string;
@@ -993,15 +1025,32 @@ type LiveAttachmentTarget = {
   explanation: FreeAgentBankTransactionExplanation | null;
 };
 
-async function receiptAttachmentContext(ownerUid: string, receiptId: string): Promise<ReceiptAttachmentContext> {
+async function receiptAttachmentContext(ownerUid: string, receiptId: string, draft?: { values?: ReviewValues; transactionId?: string }): Promise<ReceiptAttachmentContext> {
   const [receipt, proposal] = await Promise.all([
-    verifiedReceiptForMatching(ownerUid, receiptId),
+    verifiedReceiptForMatching(ownerUid, receiptId, draft?.values),
     freeAgentMatchProposalsRef(ownerUid).doc(receiptId).get(),
   ]);
-  if (!proposal.exists || proposal.get("state") !== "proposed" || proposal.get("type") !== "transaction") {
+  if (!draft?.transactionId && (!proposal.exists || proposal.get("state") !== "proposed" || proposal.get("type") !== "transaction")) {
     throw new HttpsError("failed-precondition", "Save a bank transaction match before attaching this receipt.");
   }
-  const transaction = proposal.get("transaction") as Record<string, unknown> | undefined;
+  let transaction = proposal.get("transaction") as Record<string, unknown> | undefined;
+  if (draft?.transactionId) {
+    const [transactions, proposals] = await Promise.all([
+      freeAgentTransactionsRef(ownerUid).get(),
+      freeAgentMatchProposalsRef(ownerUid).get(),
+    ]);
+    // Cache document IDs hash the URL; the public transaction ID is a field.
+    const source = transactions.docs.find((document) => document.get("id") === draft.transactionId);
+    if (!source) throw new HttpsError("not-found", "That transaction is no longer available.");
+    if (proposals.docs.some((item) => item.id !== receiptId && item.get("type") === "transaction" && item.get("transaction.id") === draft.transactionId)) {
+      throw new HttpsError("already-exists", "That transaction is already used by another receipt.");
+    }
+    const cachedTransaction = publicFreeAgentTransaction(source.data()!);
+    const ranked = rankTransactionMatches(receipt.matching, [cachedTransaction]);
+    const choice = [...ranked.suggestions, ...ranked.otherTransactions][0];
+    if (!choice) throw new HttpsError("failed-precondition", "Choose a purchase transaction.");
+    transaction = storedTransactionProposal(choice, cachedTransaction);
+  }
   const processedStoragePath = String(receipt.data.processedStoragePath ?? "");
   const processedSize = Number(receipt.data.processedSize ?? 0);
   const originalStoragePath = String(receipt.data.storagePath ?? "");
@@ -1017,6 +1066,8 @@ async function receiptAttachmentContext(ownerUid: string, receiptId: string): Pr
   return {
     receiptId,
     merchantName: receipt.verified.merchantName,
+    values: receipt.verified,
+    proposalTransaction: transaction!,
     processedStoragePath,
     processedSize,
     originalStoragePath,
@@ -1048,6 +1099,7 @@ function attachmentTargetFingerprint(context: ReceiptAttachmentContext, target: 
   return hash(JSON.stringify({
     receipt: {
       id: context.receiptId,
+      values: context.values,
       processedStoragePath: context.processedStoragePath,
       processedSize: context.processedSize,
       attachmentContentType: context.attachmentContentType,
@@ -1326,11 +1378,13 @@ type VerifiedReceiptForMatching = {
   matching: MatchingReceipt;
 };
 
-async function verifiedReceiptForMatching(ownerUid: string, receiptId: string): Promise<VerifiedReceiptForMatching> {
+async function verifiedReceiptForMatching(ownerUid: string, receiptId: string, values?: ReviewValues): Promise<VerifiedReceiptForMatching> {
   const snapshot = await getFirestore().collection("receipts").doc(receiptId).get();
   if (!snapshot.exists || snapshot.get("ownerUid") !== ownerUid) throw new HttpsError("not-found", "Receipt not found.");
-  if (snapshot.get("status") !== "verified") throw new HttpsError("failed-precondition", "Verify the receipt values before matching.");
-  const verified = StoredVerifiedDataSchema.safeParse(snapshot.get("verifiedData"));
+  if (values && snapshot.get("delivery.state") === "sent") throw new HttpsError("failed-precondition", "This receipt has already been sent.");
+  if (values && snapshot.get("status") !== "verified" && !(snapshot.get("status") === "ready_for_extraction" && snapshot.get("extraction.state") === "ready_for_verification")) throw new HttpsError("failed-precondition", "Wait for receipt extraction to finish.");
+  if (!values && snapshot.get("status") !== "verified") throw new HttpsError("failed-precondition", "Verify the receipt values before matching.");
+  const verified = StoredVerifiedDataSchema.safeParse(values ?? snapshot.get("verifiedData"));
   if (!verified.success) throw new HttpsError("failed-precondition", "The verified receipt values are incomplete.");
   return {
     data: snapshot.data()!,
@@ -1343,6 +1397,21 @@ async function verifiedReceiptForMatching(ownerUid: string, receiptId: string): 
       gbpAmountCharged: verified.data.gbpAmountCharged ?? null,
     },
   };
+}
+
+async function persistReview(ownerUid: string, receiptId: string, values: ReviewValues, expectedProcessedStoragePath: string) {
+  const reference = getFirestore().collection("receipts").doc(receiptId);
+  await getFirestore().runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(reference);
+    if (!snapshot.exists || snapshot.get("ownerUid") !== ownerUid || snapshot.get("delivery.state") === "sent") {
+      throw new HttpsError("failed-precondition", "This receipt can no longer be edited.");
+    }
+    if (snapshot.get("processedStoragePath") !== expectedProcessedStoragePath
+      || (snapshot.get("status") !== "verified" && !(snapshot.get("status") === "ready_for_extraction" && snapshot.get("extraction.state") === "ready_for_verification"))) {
+      throw new HttpsError("failed-precondition", "The receipt image changed. Wait for extraction and review it again.");
+    }
+    transaction.update(reference, { status: "verified", verifiedData: values, verifiedAt: FieldValue.serverTimestamp() });
+  });
 }
 
 function publicMatchingReceipt(receiptId: string, receipt: VerifiedReceiptForMatching) {
@@ -1789,10 +1858,31 @@ async function storeAttachments(db: Firestore, payload: IngestPayload, config: E
         },
       },
     });
+    let automaticFields: Record<string, unknown> = {};
+    try {
+      const prepared = await prepareEmailReceipt(item.bytes, item.contentType);
+      const processedStoragePath = prepared.contentType === "application/pdf"
+        ? storagePath : `receipts/${config.ownerUid}/${receiptId}/processed-v1.jpg`;
+      if (prepared.contentType === "image/jpeg") {
+        await bucket.file(processedStoragePath).save(prepared.bytes, {
+          resumable: false, validation: "crc32c", contentType: "image/jpeg",
+          metadata: { cacheControl: "private, no-store, max-age=0" },
+        });
+      }
+      automaticFields = {
+        status: "ready_for_extraction", processedStoragePath,
+        processedContentType: prepared.contentType, processedSize: prepared.bytes.length,
+        processing: { ...prepared.processing, processedAt: FieldValue.serverTimestamp() },
+      };
+    } catch {
+      // Retain the original and offer manual review when automatic preparation is unsupported.
+      logger.info("Emailed receipt requires manual image review", { receiptId });
+    }
     try {
       await receiptRef.create({
         ownerUid: config.ownerUid,
         status: "needs_review",
+        ...automaticFields,
         source: "email",
         storagePath,
         originalFileName: item.attachment.filename.slice(0, 255),

@@ -8,8 +8,8 @@ The ingestion path is:
 2. A Gmail filter forwards receipt messages to a long, private address on `ingest.flair.london`.
 3. Cloudflare Email Routing sends only that private address to the `fido-receipt-email` Worker.
 4. The Worker parses attachment MIME parts and applies size limits. If no supported attachment exists, it sanitises an HTML body, embeds bounded `cid:` images, and asks Cloudflare Browser Run to print it to PDF with JavaScript and external network requests disabled. Plain text and rendering failures use a simple text-to-PDF fallback.
-5. Firebase verifies the signature and timestamp, validates file magic bytes, rate-limits, deduplicates, and stores each attachment as a `needs_review` receipt.
-6. The owner reviews an emailed image with the crop, rotation, and quality workflow. An emailed PDF instead opens as a complete document: all pages are preserved, extracted, and later attached to FreeAgent.
+5. Firebase verifies the signature and timestamp, validates file magic bytes, rate-limits, deduplicates, and stores the original attachment. Supported images are normalised to a complete JPEG and PDFs retain every page; both queue extraction automatically. Unsupported or damaged files fall back to `needs_review`.
+6. The owner opens **Review & send** after extraction to check the values, bank match, and live FreeAgent explanation together. **Adjust image** provides optional cropping and rotation.
 
 The Worker never sends raw email bodies or HTML to Firebase. For a body-only receipt, it sends only the generated PDF. Firebase otherwise stores minimal provenance: sender, subject, message ID, and received time.
 
@@ -99,8 +99,8 @@ Only new matching messages are forwarded by Gmail filters. Existing receipts can
 1. Send a message with one small PDF or supported image attachment to `receipts@flair.london` from another account.
 2. Confirm the message remains visible in Gmail.
 3. Check Cloudflare Worker logs for a successful Firebase response.
-4. Open Fido and confirm the attachment appears as **Needs review**.
-5. Review it and approve the complete PDF without cropping; confirm that every page remains available.
+4. Open Fido and confirm the attachment progresses through **Extracting** to **Ready to review**.
+5. Open **Review & send** and confirm every PDF page remains available, with receipt fields and the suggested transaction on the same screen.
 6. Forward the same message again and confirm Fido does not create a duplicate.
 7. Send an HTML-only receipt with no attachment and confirm that it appears as an `email-receipt.pdf` item with its table/layout and any embedded receipt images intact.
 8. Confirm that remote tracking images are absent from the PDF and that a temporary Browser Run failure still produces a readable plain-text PDF.

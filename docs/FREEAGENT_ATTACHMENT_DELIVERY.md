@@ -4,11 +4,11 @@ Stage 8A can attach a verified receipt to one existing, fully explained FreeAgen
 
 ## Reviewed write boundary
 
-1. Stage 7 saves a private transaction proposal without changing FreeAgent.
-2. Opening that proposal makes a live request for the bank transaction and its existing explanation.
+1. The combined review screen supplies validated draft values and a chosen transaction; no approval or FreeAgent write happens yet. Legacy saved transaction proposals are also supported.
+2. Fido makes a live request for the selected bank transaction and its existing explanation.
 3. Fido shows the transaction, explanation type, current category nominal code, amount, date, and exact receipt filename and size.
-4. The owner separately chooses **Attach receipt to FreeAgent**.
-5. Fido repeats the live checks, verifies a short-lived preview fingerprint, downloads the exact processed asset, and sends an attachment-only `PUT`.
+4. The owner chooses **Confirm & send** once.
+5. Fido repeats the live checks, verifies a short-lived fingerprint binding the draft values, transaction and processed asset, saves the approved receipt values and match, downloads the exact asset, and sends an attachment-only `PUT`.
 6. Fido reads the explanation back, verifies the deterministic filename, and records a private delivery audit.
 
 The update body contains only `bank_transaction_explanation.attachment`. It does not contain category, amount, date, description, VAT, or other accounting fields. The category shown in the preview is therefore informational and remains controlled in FreeAgent.

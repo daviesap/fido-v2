@@ -1,10 +1,10 @@
 # Receipt matching and out-of-pocket proposals
 
-Stage 7 compares verified receipts with the private, synchronised FreeAgent transaction cache and saves a reviewable proposal. It never changes FreeAgent accounting data.
+Matching compares validated draft receipt values (or previously verified receipts) with the private, synchronised FreeAgent transaction cache. Draft matching and live attachment preview do not approve values or change FreeAgent. The combined **Review & send** screen uses one final confirmation; legacy saved proposals remain supported.
 
 ## Matching boundary
 
-The browser sends only a receipt ID to an owner-only Firebase callable. The server verifies ownership and `verified` status, reads the private transaction cache, and returns bounded ranked options. The cache and saved proposals remain denied by Firestore browser rules.
+The browser sends a receipt ID and optional validated draft values to an owner-only Firebase callable. The server verifies ownership and either `verified` status or completed extraction for draft values, reads the private transaction cache, and returns bounded ranked options. The cache and saved proposals remain denied by Firestore browser rules.
 
 Suggestions require all of the following:
 
@@ -18,7 +18,7 @@ The score is deterministic and totals 100 points:
 - date proximity: up to 25;
 - merchant similarity: up to 25.
 
-The UI shows every factor and never auto-confirms a result. Transactions outside the suggestion rules remain available through manual search. A transaction already proposed for another receipt cannot be selected again.
+The UI shows every factor and preselects a suggestion, but requires **Confirm & send** before writing. Transactions outside the suggestion rules remain available through manual search. A transaction already proposed for another receipt cannot be selected again.
 
 ### Foreign receipts before verification
 
@@ -56,7 +56,7 @@ Deleting a receipt removes its proposal. Disconnecting FreeAgent removes the tra
 
 ## Stage 8 hand-off
 
-Stage 8A reads a bank-transaction proposal, shows the live existing explanation, and requires a separate confirmation before attaching the processed JPEG or complete emailed PDF. It displays the current explanation category but never submits or changes that category. Split, partial, locked, oversized, or conflicting attachments are blocked; successful writes are read back and audited. Stage 8B will apply the same preview-and-confirm pattern to out-of-pocket Expense creation.
+The combined screen previews the selected bank transaction directly without a saved proposal. The server stores the draft values and selected transaction in the private, short-lived preview. **Confirm & send** saves the verified values and chosen match before attaching the processed JPEG or complete PDF. The legacy saved-proposal route remains available to older clients. It displays the current explanation category but never submits or changes that category. Split, partial, locked, oversized, or conflicting attachments are blocked; successful writes are read back and audited. Stage 8B will apply the same preview-and-confirm pattern to out-of-pocket Expense creation.
 
 Official API references:
 
